@@ -1,5 +1,21 @@
 import * as THREE from "three";
 import { create } from "zustand";
+import {
+  applyAnimationToProjectState,
+  clampAnimationDuration,
+  clampAnimationFps,
+  clampAnimationTime,
+  moveCameraCuts,
+  moveTimelineKeyframes,
+  resizeCameraCut,
+  recordBoneRotationChannel,
+  recordCameraChannels,
+  recordIkTargetChannel,
+  recordObjectTransformChannels,
+  removeCameraCuts,
+  removeTimelineKeyframes,
+  upsertAnimationCameraCut,
+} from "../domain/animationTimeline";
 import { defaultProject } from "../domain/defaultProject";
 import { getIkControlBones, isIkControlBoneName } from "../domain/rigUtils";
 import type {
@@ -13,6 +29,7 @@ import type {
   SceneCamera,
   SceneObject,
   SnapshotRecord,
+  TimelineKeyframeRef,
   ToolMode,
   TransformMode,
   Vec3,
@@ -73,6 +90,24 @@ type ProjectStore = ProjectState & {
   addSceneObject: (object: SceneObject) => void;
   addImportedModel: (asset: AssetRecord, object: SceneObject) => void;
   addSnapshot: (snapshot: SnapshotRecord) => void;
+  setAnimationTime: (time: number) => void;
+  setAnimationPlaying: (playing: boolean) => void;
+  toggleAnimationPlayback: () => void;
+  setAnimationAutoKeyEnabled: (enabled: boolean) => void;
+  setAnimationAutoKeyMode: (mode: ProjectState["animation"]["autoKeyMode"]) => void;
+  setAnimationDuration: (duration: number) => void;
+  setAnimationFps: (fps: number) => void;
+  stepAnimation: (deltaSeconds: number) => void;
+  captureCurrentKeyframe: () => { ok: true } | { ok: false; message: string };
+  addCurrentCameraCut: () => { ok: true } | { ok: false; message: string };
+  addCameraCutAtTime: (cameraId: string) => { ok: true } | { ok: false; message: string };
+  removeSelectedTimelineKeyframe: (refs: TimelineKeyframeRef[]) => void;
+  moveSelectedTimelineKeyframe: (refs: TimelineKeyframeRef[], time: number) => void;
+  resizeCameraCutClip: (
+    cutId: string,
+    edge: "start" | "end",
+    time: number,
+  ) => void;
   setImportError: (message?: string) => void;
   releaseRuntimeAssets: () => void;
 };
@@ -103,6 +138,213 @@ function buildIkLinkIds(
 
 function getDefaultBoneId(bones: BoneRecord[]) {
   return bones.find((bone) => !bone.parentId)?.id ?? bones[0]?.id;
+}
+
+function applyAnimationState(state: ProjectState, time: number) {
+  const nextTime = clampAnimationTime(time, state.animation.duration, state.animation.fps);
+  const sampled = applyAnimationToProjectState(state, nextTime);
+  return {
+    ...sampled,
+    animation: {
+      ...state.animation,
+      currentTime: nextTime,
+    },
+  };
+}
+
+function captureManualSelectionKeyframes(state: ProjectState) {
+  const currentTime = clampAnimationTime(
+    state.animation.currentTime,
+    state.animation.duration,
+    state.animation.fps,
+  );
+  const activeObject = state.activeObjectId
+    ? state.objects.find((object) => object.id === state.activeObjectId)
+    : undefined;
+  const activeCamera = state.selectedCameraId
+    ? state.cameras.find((camera) => camera.id === state.selectedCameraId)
+    : undefined;
+
+  if (activeObject?.rig?.hasSkeleton && activeObject.rig.boneControlActive) {
+    if (activeObject.rig.mode === "fk" && activeObject.rig.activeBoneId) {
+      const activeBone = activeObject.rig.bones.find(
+        (bone) => bone.id === activeObject.rig?.activeBoneId,
+      );
+      if (!activeBone) {
+        return { ok: false as const, message: "当前骨骼不存在，无法记录关键帧" };
+      }
+      return {
+        ok: true as const,
+        bindings: recordBoneRotationChannel(
+          state.animation.bindings,
+          activeObject,
+          activeBone,
+          currentTime,
+        ),
+      };
+    }
+
+    if (activeObject.rig.mode === "ik" && activeObject.rig.activeIkChainId) {
+      const activeChain = activeObject.rig.ikChains.find(
+        (chain) => chain.id === activeObject.rig?.activeIkChainId,
+      );
+      if (!activeChain) {
+        return { ok: false as const, message: "当前 IK 节点不存在，无法记录关键帧" };
+      }
+      return {
+        ok: true as const,
+        bindings: recordIkTargetChannel(
+          state.animation.bindings,
+          activeObject,
+          activeChain,
+          currentTime,
+        ),
+      };
+    }
+  }
+
+  if (activeObject) {
+    return {
+      ok: true as const,
+      bindings: recordObjectTransformChannels(
+        state.animation.bindings,
+        activeObject,
+        currentTime,
+      ),
+    };
+  }
+
+  if (activeCamera) {
+    return {
+      ok: true as const,
+      bindings: recordCameraChannels(state.animation.bindings, activeCamera, currentTime),
+    };
+  }
+
+  return { ok: false as const, message: "请先选择对象、机位或骨骼控制节点" };
+}
+
+function captureCameraCut(state: ProjectState) {
+  const cameraId = state.selectedCameraId ?? state.activeCameraId;
+  return captureCameraCutForCamera(state, cameraId);
+}
+
+function captureCameraCutForCamera(state: ProjectState, cameraId?: string) {
+  if (!cameraId) {
+    return { ok: false as const, message: "请先选择一个机位，再记录切换点" };
+  }
+  return {
+    ok: true as const,
+    cameraCuts: upsertAnimationCameraCut(
+      state.animation.cameraCuts,
+      cameraId,
+      clampAnimationTime(
+        state.animation.currentTime,
+        state.animation.duration,
+        state.animation.fps,
+      ),
+      state.animation.duration,
+      state.animation.fps,
+    ),
+  };
+}
+
+function maybeAutoKeyObjectTransform(
+  state: ProjectState,
+  objectId: string,
+  nextObjects: SceneObject[],
+) {
+  if (!state.animation.autoKeyEnabled || state.activeObjectId !== objectId) {
+    return state.animation;
+  }
+  const activeObject = nextObjects.find((object) => object.id === objectId);
+  if (!activeObject) {
+    return state.animation;
+  }
+  return {
+    ...state.animation,
+    bindings: recordObjectTransformChannels(
+      state.animation.bindings,
+      activeObject,
+      state.animation.currentTime,
+      state.animation.autoKeyMode,
+    ),
+  };
+}
+
+function maybeAutoKeyCamera(
+  state: ProjectState,
+  cameraId: string,
+  nextCameras: SceneCamera[],
+) {
+  if (!state.animation.autoKeyEnabled || state.selectedCameraId !== cameraId) {
+    return state.animation;
+  }
+  const activeCamera = nextCameras.find((camera) => camera.id === cameraId);
+  if (!activeCamera) {
+    return state.animation;
+  }
+  return {
+    ...state.animation,
+    bindings: recordCameraChannels(
+      state.animation.bindings,
+      activeCamera,
+      state.animation.currentTime,
+      state.animation.autoKeyMode,
+    ),
+  };
+}
+
+function maybeAutoKeyBone(
+  state: ProjectState,
+  objectId: string,
+  boneId: string,
+  nextObjects: SceneObject[],
+) {
+  if (!state.animation.autoKeyEnabled || state.activeObjectId !== objectId) {
+    return state.animation;
+  }
+  const activeObject = nextObjects.find((object) => object.id === objectId);
+  const activeBone = activeObject?.rig?.bones.find((bone) => bone.id === boneId);
+  if (!activeObject || !activeBone) {
+    return state.animation;
+  }
+  return {
+    ...state.animation,
+    bindings: recordBoneRotationChannel(
+      state.animation.bindings,
+      activeObject,
+      activeBone,
+      state.animation.currentTime,
+      state.animation.autoKeyMode,
+    ),
+  };
+}
+
+function maybeAutoKeyIkChain(
+  state: ProjectState,
+  objectId: string,
+  chainId: string,
+  nextObjects: SceneObject[],
+) {
+  if (!state.animation.autoKeyEnabled || state.activeObjectId !== objectId) {
+    return state.animation;
+  }
+  const activeObject = nextObjects.find((object) => object.id === objectId);
+  const activeChain = activeObject?.rig?.ikChains.find((chain) => chain.id === chainId);
+  if (!activeObject || !activeChain) {
+    return state.animation;
+  }
+  return {
+    ...state.animation,
+    bindings: recordIkTargetChannel(
+      state.animation.bindings,
+      activeObject,
+      activeChain,
+      state.animation.currentTime,
+      state.animation.autoKeyMode,
+    ),
+  };
 }
 
 const matrixPosition = new THREE.Vector3();
@@ -189,11 +431,15 @@ export const useProjectStore = create<ProjectStore>((set) => ({
       };
     }),
   updateCamera: (cameraId, updates) =>
-    set((state) => ({
-      cameras: state.cameras.map((camera) =>
+    set((state) => {
+      const cameras = state.cameras.map((camera) =>
         camera.id === cameraId ? { ...camera, ...updates } : camera,
-      ),
-    })),
+      );
+      return {
+        cameras,
+        animation: maybeAutoKeyCamera(state, cameraId, cameras),
+      };
+    }),
   updateWorldSettings: (updates) =>
     set((state) => {
       return {
@@ -370,8 +616,8 @@ export const useProjectStore = create<ProjectStore>((set) => ({
       selectedCameraId: undefined,
     })),
   updateBoneRotation: (objectId, boneId, rotation) =>
-    set((state) => ({
-      objects: state.objects.map((object) =>
+    set((state) => {
+      const objects = state.objects.map((object) =>
         object.id === objectId && object.rig
           ? {
               ...object,
@@ -385,11 +631,15 @@ export const useProjectStore = create<ProjectStore>((set) => ({
               },
             }
           : object,
-      ),
-    })),
+      );
+      return {
+        objects,
+        animation: maybeAutoKeyBone(state, objectId, boneId, objects),
+      };
+    }),
   updateBonePosition: (objectId, boneId, position) =>
-    set((state) => ({
-      objects: state.objects.map((object) =>
+    set((state) => {
+      const objects = state.objects.map((object) =>
         object.id === objectId && object.rig
           ? {
               ...object,
@@ -403,8 +653,11 @@ export const useProjectStore = create<ProjectStore>((set) => ({
               },
             }
           : object,
-      ),
-    })),
+      );
+      return {
+        objects,
+      };
+    }),
   createIkChain: (objectId, rootBoneId, effectorBoneId) => {
     const state = useProjectStore.getState();
     const object = state.objects.find((item) => item.id === objectId);
@@ -462,8 +715,8 @@ export const useProjectStore = create<ProjectStore>((set) => ({
       selectedCameraId: undefined,
     })),
   updateIkChain: (objectId, chainId, updates) =>
-    set((state) => ({
-      objects: state.objects.map((object) =>
+    set((state) => {
+      const objects = state.objects.map((object) =>
         object.id === objectId && object.rig
           ? {
               ...object,
@@ -475,8 +728,12 @@ export const useProjectStore = create<ProjectStore>((set) => ({
               },
             }
           : object,
-      ),
-    })),
+      );
+      return {
+        objects,
+        animation: maybeAutoKeyIkChain(state, objectId, chainId, objects),
+      };
+    }),
   removeIkChain: (objectId, chainId) =>
     set((state) => ({
       objects: state.objects.map((object) =>
@@ -502,8 +759,8 @@ export const useProjectStore = create<ProjectStore>((set) => ({
       ),
     })),
   updateObjectTransform: (objectId, transform) =>
-    set((state) => ({
-      objects: state.objects.map((object) => {
+    set((state) => {
+      const objects = state.objects.map((object) => {
         if (object.id !== objectId) {
           return object;
         }
@@ -536,8 +793,12 @@ export const useProjectStore = create<ProjectStore>((set) => ({
             })),
           },
         };
-      }),
-    })),
+      });
+      return {
+        objects,
+        animation: maybeAutoKeyObjectTransform(state, objectId, objects),
+      };
+    }),
   updateObjectMetrics: (objectId, updates) =>
     set((state) => ({
       objects: state.objects.map((object) =>
@@ -661,6 +922,199 @@ export const useProjectStore = create<ProjectStore>((set) => ({
     set((state) => ({
       snapshots: [snapshot, ...state.snapshots],
     })),
+  setAnimationTime: (time) =>
+    set((state) => applyAnimationState(state, time)),
+  setAnimationPlaying: (playing) =>
+    set((state) => ({
+      animation: {
+        ...state.animation,
+        currentTime:
+          playing && state.animation.currentTime >= state.animation.duration - 0.0001
+            ? 0
+            : state.animation.currentTime,
+        isPlaying: playing,
+      },
+    })),
+  toggleAnimationPlayback: () =>
+    set((state) => {
+      const nextPlaying = !state.animation.isPlaying;
+      return {
+        animation: {
+          ...state.animation,
+          currentTime:
+            nextPlaying && state.animation.currentTime >= state.animation.duration - 0.0001
+              ? 0
+              : state.animation.currentTime,
+          isPlaying: nextPlaying,
+        },
+      };
+    }),
+  setAnimationAutoKeyEnabled: (enabled) =>
+    set((state) => ({
+      animation: {
+        ...state.animation,
+        autoKeyEnabled: enabled,
+      },
+    })),
+  setAnimationAutoKeyMode: (mode) =>
+    set((state) => ({
+      animation: {
+        ...state.animation,
+        autoKeyMode: mode,
+      },
+    })),
+  setAnimationDuration: (duration) =>
+    set((state) => {
+      const nextDuration = clampAnimationDuration(duration);
+      const nextState = {
+        ...state,
+        animation: {
+          ...state.animation,
+          duration: nextDuration,
+        },
+      };
+      return applyAnimationState(nextState, state.animation.currentTime);
+    }),
+  setAnimationFps: (fps) =>
+    set((state) => {
+      const nextFps = clampAnimationFps(fps);
+      const nextState = {
+        ...state,
+        animation: {
+          ...state.animation,
+          fps: nextFps,
+        },
+      };
+      return applyAnimationState(nextState, state.animation.currentTime);
+    }),
+  stepAnimation: (deltaSeconds) =>
+    set((state) => {
+      if (!state.animation.isPlaying) {
+        return state;
+      }
+      const duration = clampAnimationDuration(state.animation.duration);
+      const rawNextTime = state.animation.currentTime + Math.max(0, deltaSeconds);
+      const shouldLoop = state.animation.loop;
+      const nextTime =
+        rawNextTime > duration
+          ? shouldLoop
+            ? rawNextTime % duration
+            : duration
+          : rawNextTime;
+      if (!shouldLoop && rawNextTime >= duration) {
+        return {
+          animation: {
+            ...state.animation,
+            currentTime: nextTime,
+            isPlaying: false,
+          },
+        };
+      }
+      return {
+        animation: {
+          ...state.animation,
+          currentTime: nextTime,
+        },
+      };
+    }),
+  captureCurrentKeyframe: () => {
+    const state = useProjectStore.getState();
+    const result = captureManualSelectionKeyframes(state);
+    if (!result.ok) {
+      return result;
+    }
+    set((current) => ({
+      animation: {
+        ...current.animation,
+        bindings: result.bindings,
+      },
+    }));
+    return { ok: true as const };
+  },
+  addCurrentCameraCut: () => {
+    const state = useProjectStore.getState();
+    const result = captureCameraCut(state);
+    if (!result.ok) {
+      return result;
+    }
+    set((current) => ({
+      animation: {
+        ...current.animation,
+        cameraCuts: result.cameraCuts,
+      },
+    }));
+    return { ok: true as const };
+  },
+  addCameraCutAtTime: (cameraId) => {
+    const state = useProjectStore.getState();
+    const result = captureCameraCutForCamera(state, cameraId);
+    if (!result.ok) {
+      return result;
+    }
+    set((current) => ({
+      animation: {
+        ...current.animation,
+        cameraCuts: result.cameraCuts,
+      },
+    }));
+    return { ok: true as const };
+  },
+  removeSelectedTimelineKeyframe: (refs) =>
+    set((state) => ({
+      animation: {
+        ...state.animation,
+        bindings: removeTimelineKeyframes(state.animation.bindings, refs),
+        cameraCuts: removeCameraCuts(state.animation.cameraCuts, refs),
+      },
+    })),
+  moveSelectedTimelineKeyframe: (refs, time) =>
+    set((state) => {
+      const nextTime = clampAnimationTime(
+        time,
+        state.animation.duration,
+        state.animation.fps,
+      );
+      const nextBindings = moveTimelineKeyframes(
+        state.animation.bindings,
+        refs,
+        nextTime,
+      );
+      const nextCameraCuts = moveCameraCuts(
+        state.animation.cameraCuts,
+        refs,
+        nextTime,
+        state.animation.duration,
+        state.animation.fps,
+      );
+      return applyAnimationState(
+        {
+          ...state,
+          animation: {
+            ...state.animation,
+            bindings: nextBindings,
+            cameraCuts: nextCameraCuts,
+          },
+        },
+        state.animation.currentTime,
+      );
+    }),
+  resizeCameraCutClip: (cutId, edge, time) =>
+    set((state) => {
+      const nextCameraCuts = resizeCameraCut(
+        state.animation.cameraCuts,
+        cutId,
+        edge,
+        time,
+        state.animation.duration,
+        state.animation.fps,
+      );
+      return {
+        animation: {
+          ...state.animation,
+          cameraCuts: nextCameraCuts,
+        },
+      };
+    }),
   setImportError: (message) => set({ importError: message }),
   releaseRuntimeAssets: () =>
     set((state) => {

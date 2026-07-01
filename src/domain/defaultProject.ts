@@ -65,4 +65,15 @@ export const defaultProject: ProjectState = {
   ],
   cameraPreviewActive: false,
   snapshots: [],
+  animation: {
+    fps: 24,
+    duration: 6,
+    currentTime: 0,
+    isPlaying: false,
+    loop: false,
+    autoKeyEnabled: false,
+    autoKeyMode: "add_replace",
+    bindings: [],
+    cameraCuts: [],
+  },
 };

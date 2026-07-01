@@ -3,7 +3,18 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
 import { resolveCameraTarget } from "../../domain/cameraTargets";
+import {
+  applyAnimationToProjectState,
+  resolvePlaybackCameraId,
+} from "../../domain/animationTimeline";
 import { getOutputFrameRatio } from "../../domain/outputFrames";
+import {
+  buildAnimationExportPayload,
+  downloadBlobFile,
+  downloadJsonFile,
+  getSupportedAnimationVideoFormat,
+  type AnimationExportRequestDetail,
+} from "../../export/animationExport";
 import {
   createSnapshotName,
   downloadDataUrl,
@@ -108,11 +119,14 @@ export function Viewport3D() {
     const projectedSelectionPoint = new THREE.Vector3();
     const cameraRigs = new Map<string, THREE.Object3D>();
     const objectBoundsHelpers = new Map<string, THREE.BoxHelper>();
+    let activeCameraAimId: string | undefined;
     let panoramaTexture: THREE.Texture | undefined;
     let loadedPanoramaAssetId: string | undefined;
     let lastPreviewEmitAt = 0;
     let lastLabelEmitAt = 0;
     let previousPreviewActive = false;
+    let previousPlaybackActive = false;
+    let exportInProgress = false;
     let pointerDownPosition = { x: 0, y: 0 };
     let editorPose:
       | {
@@ -158,9 +172,32 @@ export function Viewport3D() {
       const object = transformControls.object;
       const objectId = object?.userData.workbenchObjectId;
       const cameraId = object?.userData.workbenchCameraId;
+      const cameraAimId = object?.userData.workbenchCameraAimId;
       const boneId = object?.userData.workbenchBoneId;
       const ikChainId = object?.userData.workbenchIkChainId;
       if (!object) {
+        return;
+      }
+      if (typeof cameraAimId === "string") {
+        const activeCamera = useProjectStore
+          .getState()
+          .cameras.find((item) => item.id === cameraAimId);
+        if (!activeCamera) {
+          return;
+        }
+        const worldTarget = object.getWorldPosition(new THREE.Vector3());
+        const target: Vec3 = [worldTarget.x, worldTarget.y, worldTarget.z];
+        const rotation = getLookAtRotation(
+          new THREE.Vector3(...activeCamera.position),
+          worldTarget,
+        );
+        useProjectStore.getState().updateCamera(cameraAimId, {
+          target,
+          targetMode: "manual",
+          targetRefId: undefined,
+          targetRefType: undefined,
+          rotation: [rotation.x, rotation.y, rotation.z],
+        });
         return;
       }
       if (
@@ -308,12 +345,16 @@ export function Viewport3D() {
       renderer.setSize(width, height);
     };
 
-    const resolveRuntimeCamera = (cameraState: SceneCamera) => ({
+    const resolveRuntimeCamera = (
+      cameraState: SceneCamera,
+      objects: SceneObject[] = storeRef.current.objects,
+      cameras: SceneCamera[] = storeRef.current.cameras,
+    ) => ({
       ...cameraState,
       target: resolveCameraTarget(
         cameraState,
-        storeRef.current.objects,
-        storeRef.current.cameras,
+        objects,
+        cameras,
       ),
     });
 
@@ -546,6 +587,12 @@ export function Viewport3D() {
             objectId: current.userData.workbenchObjectId as string,
           };
         }
+        if (typeof current.userData.workbenchCameraAimId === "string") {
+          return {
+            type: "camera-aim" as const,
+            id: current.userData.workbenchCameraAimId as string,
+          };
+        }
         if (typeof current.userData.workbenchObjectId === "string") {
           return {
             type: "object" as const,
@@ -647,6 +694,7 @@ export function Viewport3D() {
         .find(Boolean);
 
       if (!matched) {
+        activeCameraAimId = undefined;
         useProjectStore.getState().clearSelection();
         return;
       }
@@ -654,19 +702,28 @@ export function Viewport3D() {
         return;
       }
       if (matched.type === "object") {
+        activeCameraAimId = undefined;
         useProjectStore.getState().setActiveObject(matched.id);
         return;
       }
       if (matched.type === "bone") {
+        activeCameraAimId = undefined;
         useProjectStore.getState().setActiveObject(matched.objectId);
         useProjectStore.getState().setActiveBone(matched.objectId, matched.boneId);
         return;
       }
       if (matched.type === "ik-target") {
+        activeCameraAimId = undefined;
         useProjectStore.getState().setActiveObject(matched.objectId);
         useProjectStore.getState().setActiveIkChain(matched.objectId, matched.chainId);
         return;
       }
+      if (matched.type === "camera-aim") {
+        activeCameraAimId = matched.id;
+        useProjectStore.getState().setActiveCamera(matched.id);
+        return;
+      }
+      activeCameraAimId = undefined;
       useProjectStore.getState().setActiveCamera(matched.id);
     };
 
@@ -739,6 +796,7 @@ export function Viewport3D() {
           transformControls.attach(targetObject);
         }
         transformControls.setMode(state.transformMode);
+        transformControls.space = "world";
         return;
       }
 
@@ -746,12 +804,31 @@ export function Viewport3D() {
         (item) => item.id === state.selectedCameraId,
       );
       const cameraRig = selectedCamera ? cameraRigs.get(selectedCamera.id) : undefined;
+      const cameraAimTarget =
+        selectedCamera && activeCameraAimId === selectedCamera.id
+          ? cameraRig?.getObjectByName("camera-look-at-target")
+          : undefined;
+      if (
+        selectedCamera &&
+        cameraAimTarget &&
+        selectedCamera.mode === "lookAt" &&
+        !selectedCamera.locked &&
+        selectedCamera.visible
+      ) {
+        if (transformControls.object !== cameraAimTarget) {
+          transformControls.attach(cameraAimTarget);
+        }
+        transformControls.setMode("translate");
+        transformControls.space = "world";
+        return;
+      }
       if (
         !cameraRig ||
         !selectedCamera ||
         selectedCamera.locked ||
         !selectedCamera.visible
       ) {
+        activeCameraAimId = undefined;
         transformControls.detach();
         return;
       }
@@ -765,6 +842,121 @@ export function Viewport3D() {
             ? "translate"
             : state.transformMode,
       );
+      transformControls.space =
+        selectedCamera.mode === "free" && state.transformMode === "rotate"
+          ? "local"
+          : "world";
+    };
+
+    const renderCleanScene = (
+      targetRenderer: THREE.WebGLRenderer,
+      targetCamera: THREE.Camera,
+    ) => {
+      const helperObjects = [
+        transformHelper,
+        axes,
+        ...Array.from(cameraRigs.values()),
+        ...Array.from(objectBoundsHelpers.values()),
+        ...skeletonRegistry.getHelperObjects(),
+      ];
+      const visibility = helperObjects.map((object) => ({
+        object,
+        visible: object.visible,
+      }));
+      helperObjects.forEach((object) => {
+        object.visible = false;
+      });
+      targetRenderer.render(scene, targetCamera);
+      visibility.forEach(({ object, visible }) => {
+        object.visible = visible;
+      });
+    };
+
+    const wait = (milliseconds: number) =>
+      new Promise<void>((resolve) => {
+        window.setTimeout(resolve, milliseconds);
+      });
+
+    const createRecordingCanvas = () => {
+      const source = renderer.domElement;
+      const aspectRatio =
+        storeRef.current.outputFrame.presetId === "default"
+          ? undefined
+          : getOutputAspectRatio();
+      const sourceWidth = source.width;
+      const sourceHeight = source.height;
+      const sourceRatio = sourceWidth / sourceHeight;
+      let cropWidth = sourceWidth;
+      let cropHeight = sourceHeight;
+      let offsetX = 0;
+      let offsetY = 0;
+
+      if (aspectRatio && Number.isFinite(aspectRatio) && aspectRatio > 0) {
+        if (sourceRatio > aspectRatio) {
+          cropWidth = Math.round(sourceHeight * aspectRatio);
+          offsetX = Math.round((sourceWidth - cropWidth) / 2);
+        } else if (sourceRatio < aspectRatio) {
+          cropHeight = Math.round(sourceWidth / aspectRatio);
+          offsetY = Math.round((sourceHeight - cropHeight) / 2);
+        }
+      }
+
+      const canvas = document.createElement("canvas");
+      canvas.width = cropWidth;
+      canvas.height = cropHeight;
+      const context = canvas.getContext("2d");
+      if (!context) {
+        throw new Error("无法创建动画导出画布");
+      }
+
+      return {
+        canvas,
+        draw: () => {
+          context.drawImage(
+            source,
+            offsetX,
+            offsetY,
+            cropWidth,
+            cropHeight,
+            0,
+            0,
+            cropWidth,
+            cropHeight,
+          );
+        },
+      };
+    };
+
+    const renderSampledAnimationFrame = (
+      time: number,
+      state: ReturnType<typeof useProjectStore.getState>,
+    ) => {
+      const sampled = applyAnimationToProjectState(state, time);
+      sampled.objects.forEach(applyObjectState);
+      syncCameraRigs(sampled.cameras);
+      syncObjectBounds();
+      const cameraId = resolvePlaybackCameraId(
+        state.animation.cameraCuts,
+        time,
+        state.activeCameraId,
+      );
+      const shotCamera =
+        sampled.cameras.find((item) => item.id === cameraId) ?? sampled.cameras[0];
+      if (shotCamera) {
+        applyCameraStateToPerspectiveCamera(
+          camera,
+          resolveRuntimeCamera(shotCamera, sampled.objects, sampled.cameras),
+        );
+      }
+      renderCleanScene(renderer, camera);
+    };
+
+    const restoreSceneFromStore = () => {
+      const state = storeRef.current;
+      state.objects.forEach(applyObjectState);
+      syncCameraRigs(state.cameras);
+      syncObjectBounds();
+      syncTransformControls();
     };
 
     const unsubscribeSceneSync = useProjectStore.subscribe((state) => {
@@ -941,6 +1133,9 @@ export function Viewport3D() {
       if (!rig) {
         return;
       }
+      if (activeCameraAimId === cameraId) {
+        activeCameraAimId = undefined;
+      }
       if (transformControls.object === rig) {
         transformControls.detach();
       }
@@ -1008,7 +1203,7 @@ export function Viewport3D() {
       if (activeCamera) {
         applyCameraStateToPerspectiveCamera(camera, resolveRuntimeCamera(activeCamera));
       }
-      renderer.render(scene, camera);
+      renderCleanScene(renderer, camera);
       const imageDataUrl = exportCanvasWithAspectRatio(
         renderer.domElement,
         storeRef.current.outputFrame.presetId === "default"
@@ -1032,6 +1227,129 @@ export function Viewport3D() {
       }
     };
 
+    const handleAnimationExport = async (event: Event) => {
+      if (exportInProgress) {
+        window.dispatchEvent(
+          new CustomEvent("animation-export-error", {
+            detail: { message: "已有动画正在导出，请稍后再试" },
+          }),
+        );
+        return;
+      }
+
+      const { name, range } = (event as CustomEvent<AnimationExportRequestDetail>).detail;
+      const store = useProjectStore.getState();
+      const wasPlaying = store.animation.isPlaying;
+      const originalTime = store.animation.currentTime;
+      const originalPose = {
+        fov: camera.fov,
+        position: camera.position.clone(),
+        rotation: camera.rotation.clone(),
+        target: controls.target.clone(),
+        controlsEnabled: controls.enabled,
+      };
+      exportInProgress = true;
+      store.setAnimationPlaying(false);
+      const exportState = useProjectStore.getState();
+      let recordingStream: MediaStream | undefined;
+
+      const fallbackToJson = () => {
+        const payload = buildAnimationExportPayload({
+          projectName: exportState.projectName,
+          outputFrame: exportState.outputFrame,
+          objects: exportState.objects,
+          cameras: exportState.cameras,
+          animation: exportState.animation,
+          range,
+        });
+        downloadJsonFile(payload, `${name}.json`);
+        window.dispatchEvent(
+          new CustomEvent("animation-export-complete", {
+            detail: { filename: `${name}.json`, format: "JSON" },
+          }),
+        );
+      };
+
+      try {
+        const videoFormat = getSupportedAnimationVideoFormat();
+        if (!videoFormat || typeof HTMLCanvasElement.prototype.captureStream !== "function") {
+          fallbackToJson();
+          return;
+        }
+
+        const recording = createRecordingCanvas();
+        recordingStream = recording.canvas.captureStream(0);
+        const track = recordingStream.getVideoTracks()[0] as CanvasCaptureMediaStreamTrack & {
+          requestFrame?: () => void;
+        };
+        const chunks: Blob[] = [];
+        const recorder = new MediaRecorder(recordingStream, { mimeType: videoFormat.mimeType });
+        const stopped = new Promise<void>((resolve, reject) => {
+          recorder.onstop = () => resolve();
+          recorder.onerror = () => reject(new Error("动画录制中断"));
+        });
+        recorder.ondataavailable = (dataEvent) => {
+          if (dataEvent.data.size > 0) {
+            chunks.push(dataEvent.data);
+          }
+        };
+
+        recorder.start();
+        for (let frame = range.startFrame; frame <= range.endFrame; frame += 1) {
+          const frameIndex = frame - range.startFrame + 1;
+          renderSampledAnimationFrame(frame / exportState.animation.fps, exportState);
+          recording.draw();
+          track.requestFrame?.();
+          window.dispatchEvent(
+            new CustomEvent("animation-export-progress", {
+              detail: { current: frameIndex, total: range.frameCount },
+            }),
+          );
+          await wait(1000 / exportState.animation.fps);
+        }
+
+        recorder.stop();
+        await stopped;
+        if (!chunks.length) {
+          throw new Error("未生成视频数据");
+        }
+        const blob = new Blob(chunks, { type: videoFormat.mimeType });
+        downloadBlobFile(blob, `${name}.${videoFormat.extension}`);
+        window.dispatchEvent(
+          new CustomEvent("animation-export-complete", {
+            detail: {
+              filename: `${name}.${videoFormat.extension}`,
+              format: videoFormat.formatLabel,
+            },
+          }),
+        );
+      } catch (error) {
+        window.dispatchEvent(
+          new CustomEvent("animation-export-error", {
+            detail: {
+              message:
+                error instanceof Error
+                  ? `动画导出失败：${error.message}`
+                  : "动画导出失败",
+            },
+          }),
+        );
+      } finally {
+        recordingStream?.getTracks().forEach((item) => item.stop());
+        exportInProgress = false;
+        useProjectStore.getState().setAnimationTime(originalTime);
+        useProjectStore.getState().setAnimationPlaying(wasPlaying);
+        restoreSceneFromStore();
+        camera.position.copy(originalPose.position);
+        camera.rotation.copy(originalPose.rotation);
+        camera.fov = originalPose.fov;
+        camera.updateProjectionMatrix();
+        controls.target.copy(originalPose.target);
+        controls.enabled = originalPose.controlsEnabled;
+        controls.update();
+      }
+    };
+
     const handleBeforeUnload = () => {
       skeletonRegistry.disposeAll();
       sceneRegistry.disposeAll();
@@ -1040,11 +1358,46 @@ export function Viewport3D() {
 
     let animationFrame = 0;
     const animate = () => {
-      const activeCamera = storeRef.current.cameras.find(
+      const now = performance.now();
+      if (exportInProgress) {
+        animationFrame = requestAnimationFrame(animate);
+        return;
+      }
+      const playbackActive = storeRef.current.animation.isPlaying;
+      const sampled = playbackActive
+        ? applyAnimationToProjectState(
+            storeRef.current,
+            storeRef.current.animation.currentTime,
+          )
+        : undefined;
+      const sceneObjects = sampled?.objects ?? storeRef.current.objects;
+      const sceneCameras = sampled?.cameras ?? storeRef.current.cameras;
+
+      if (sampled) {
+        sampled.objects.forEach(applyObjectState);
+        syncCameraRigs(sampled.cameras);
+      }
+
+      const activeCamera = sceneCameras.find(
         (item) => item.id === storeRef.current.activeCameraId,
       );
+      const playbackCameraId = playbackActive
+        ? resolvePlaybackCameraId(
+            storeRef.current.animation.cameraCuts,
+            storeRef.current.animation.currentTime,
+            storeRef.current.activeCameraId,
+          )
+        : storeRef.current.activeCameraId;
+      const playbackCamera = sceneCameras.find(
+        (item) => item.id === playbackCameraId,
+      );
       const previewActive = storeRef.current.cameraPreviewActive;
-      if (previewActive && !previousPreviewActive) {
+      const playingShotActive = playbackActive && Boolean(playbackCamera);
+      const shotCamera = playingShotActive ? playbackCamera : previewActive ? activeCamera : undefined;
+      const shotCameraActive = previewActive || playingShotActive;
+      const wasShotCameraActive = previousPreviewActive || previousPlaybackActive;
+
+      if (shotCameraActive && !wasShotCameraActive) {
         editorPose = {
           fov: camera.fov,
           position: camera.position.clone(),
@@ -1052,7 +1405,7 @@ export function Viewport3D() {
           target: controls.target.clone(),
         };
       }
-      if (!previewActive && previousPreviewActive && editorPose) {
+      if (!shotCameraActive && wasShotCameraActive && editorPose) {
         camera.position.copy(editorPose.position);
         camera.rotation.copy(editorPose.rotation);
         camera.fov = editorPose.fov;
@@ -1062,29 +1415,44 @@ export function Viewport3D() {
         editorPose = undefined;
       }
       previousPreviewActive = previewActive;
+      previousPlaybackActive = playbackActive;
 
-      if (previewActive && activeCamera) {
-        applyCameraStateToPerspectiveCamera(camera, resolveRuntimeCamera(activeCamera));
+      if (shotCameraActive && shotCamera) {
+        const runtimeShotCamera = resolveRuntimeCamera(
+          shotCamera,
+          sceneObjects,
+          sceneCameras,
+        );
+        applyCameraStateToPerspectiveCamera(camera, runtimeShotCamera);
         controls.enabled = false;
       } else {
         controls.enabled = !draggingRef.current;
+        controls.update();
       }
-      controls.update();
-      renderer.render(scene, camera);
+      if (shotCameraActive) {
+        renderCleanScene(renderer, camera);
+      } else {
+        renderer.render(scene, camera);
+      }
 
-      if (activeCamera) {
+      const inspectedCamera =
+        storeRef.current.animation.isPlaying
+          ? playbackCamera
+          : sceneCameras.find(
+              (item) => item.id === storeRef.current.selectedCameraId,
+            ) ?? activeCamera;
+      if (inspectedCamera) {
         applyCameraStateToPerspectiveCamera(
           previewCamera,
-          resolveRuntimeCamera(activeCamera),
+          resolveRuntimeCamera(inspectedCamera, sceneObjects, sceneCameras),
         );
-        previewRenderer.render(scene, previewCamera);
-        const now = performance.now();
+        renderCleanScene(previewRenderer, previewCamera);
         if (now - lastPreviewEmitAt > 140) {
           lastPreviewEmitAt = now;
           window.dispatchEvent(
             new CustomEvent("camera-preview-frame", {
               detail: {
-                cameraId: activeCamera.id,
+                cameraId: inspectedCamera.id,
                 imageDataUrl: previewRenderer.domElement.toDataURL("image/png"),
               },
             }),
@@ -1111,6 +1479,7 @@ export function Viewport3D() {
     window.addEventListener("panorama-import-request", handlePanoramaImport);
     window.addEventListener("viewport-reset-view-request", handleViewReset);
     window.addEventListener("snapshot-export-request", handleSnapshotExport);
+    window.addEventListener("animation-export-request", handleAnimationExport);
     window.addEventListener("beforeunload", handleBeforeUnload);
     renderer.domElement.addEventListener("pointerdown", handlePointerDown);
     renderer.domElement.addEventListener("pointerup", handleViewportSelection);
@@ -1132,6 +1501,7 @@ export function Viewport3D() {
       window.removeEventListener("panorama-import-request", handlePanoramaImport);
       window.removeEventListener("viewport-reset-view-request", handleViewReset);
       window.removeEventListener("snapshot-export-request", handleSnapshotExport);
+      window.removeEventListener("animation-export-request", handleAnimationExport);
       window.removeEventListener("beforeunload", handleBeforeUnload);
       renderer.domElement.removeEventListener("pointerdown", handlePointerDown);
       renderer.domElement.removeEventListener("pointerup", handleViewportSelection);

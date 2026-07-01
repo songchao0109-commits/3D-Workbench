@@ -5,10 +5,12 @@ import { createCameraMarker } from "./sceneObjects";
 const targetSphereName = "camera-look-at-target";
 const aimLineName = "camera-aim-line";
 
-function setLinePoints(line: THREE.Line, camera: SceneCamera) {
-  const targetLocal = new THREE.Vector3(...camera.target).sub(
-    new THREE.Vector3(...camera.position),
-  );
+function getLocalTargetPosition(rig: THREE.Object3D, camera: SceneCamera) {
+  const targetWorld = new THREE.Vector3(...camera.target);
+  return rig.worldToLocal(targetWorld);
+}
+
+function setLinePoints(line: THREE.Line, targetLocal: THREE.Vector3) {
   const positions = line.geometry.getAttribute("position");
   positions.setXYZ(0, 0, 0, 0);
   positions.setXYZ(1, targetLocal.x, targetLocal.y, targetLocal.z);
@@ -40,15 +42,14 @@ export function applyCameraStateToRig(rig: THREE.Object3D, camera: SceneCamera) 
 
   const targetSphere = rig.getObjectByName(targetSphereName);
   const line = rig.getObjectByName(aimLineName);
+  const targetLocal = getLocalTargetPosition(rig, camera);
   if (targetSphere) {
     targetSphere.visible = camera.mode === "lookAt";
-    targetSphere.position.copy(
-      new THREE.Vector3(...camera.target).sub(new THREE.Vector3(...camera.position)),
-    );
+    targetSphere.position.copy(targetLocal);
   }
   if (line instanceof THREE.Line) {
     line.visible = camera.mode === "lookAt";
-    setLinePoints(line, camera);
+    setLinePoints(line, targetLocal);
   }
 }
 
@@ -79,6 +80,7 @@ export function createCameraRig(camera: SceneCamera) {
   const targetMaterial = new THREE.MeshBasicMaterial({ color: 0xffff00 });
   const target = new THREE.Mesh(targetGeometry, targetMaterial);
   target.name = targetSphereName;
+  target.userData.workbenchCameraAimId = camera.id;
   const lineMaterial = new THREE.LineBasicMaterial({ color: 0xd8c600 });
   const lineGeometry = new THREE.BufferGeometry();
   lineGeometry.setAttribute(

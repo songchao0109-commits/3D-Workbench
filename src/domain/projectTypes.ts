@@ -12,6 +12,18 @@ export type CameraMode = "free" | "lookAt";
 export type RigMode = "fk" | "ik";
 export type CameraTargetMode = "manual" | "asset";
 export type CameraTargetRefType = "object" | "camera";
+export type AnimationInterpolation = "linear" | "step";
+export type AnimationBindingTargetType = "object" | "camera";
+export type AnimationAutoKeyMode = "add_replace" | "replace";
+export type AnimationChannelPath =
+  | "position"
+  | "rotation"
+  | "scale"
+  | "target"
+  | "fov"
+  | "boneRotation"
+  | "ikTargetPosition";
+export type AnimationChannelValue = number | Vec3;
 export type OutputFramePresetId =
   | "default"
   | "cinema_21_9"
@@ -144,6 +156,65 @@ export type SnapshotRecord = {
   imageDataUrl: string;
 };
 
+export type AnimationKeyframe = {
+  id: string;
+  time: number;
+  value: AnimationChannelValue;
+  interpolation: AnimationInterpolation;
+};
+
+export type AnimationCameraCut = {
+  id: string;
+  startTime: number;
+  endTime: number;
+  cameraId: string;
+  time?: number;
+};
+
+export type AnimationChannelKeyframeRef = {
+  kind: "channel";
+  bindingId: string;
+  channelId: string;
+  keyframeId: string;
+};
+
+export type AnimationCameraCutRef = {
+  kind: "cameraCut";
+  cutId: string;
+};
+
+export type TimelineKeyframeRef = AnimationChannelKeyframeRef | AnimationCameraCutRef;
+
+export type AnimationChannel = {
+  id: string;
+  label: string;
+  path: AnimationChannelPath;
+  valueType: "number" | "vec3";
+  boneId?: string;
+  ikChainId?: string;
+  keyframes: AnimationKeyframe[];
+};
+
+export type AnimationBinding = {
+  id: string;
+  targetType: AnimationBindingTargetType;
+  targetId: string;
+  label: string;
+  channels: AnimationChannel[];
+};
+
+export type AnimationTimelineState = {
+  fps: number;
+  duration: number;
+  currentTime: number;
+  isPlaying: boolean;
+  loop: boolean;
+  autoKeyEnabled: boolean;
+  autoKeyMode: AnimationAutoKeyMode;
+  bindings: AnimationBinding[];
+  cameraCuts: AnimationCameraCut[];
+};
+
 export type ProjectState = {
   schemaVersion: "0.1";
   projectName: string;
@@ -160,5 +231,6 @@ export type ProjectState = {
   objects: SceneObject[];
   cameras: SceneCamera[];
   snapshots: SnapshotRecord[];
+  animation: AnimationTimelineState;
   importError?: string;
 };

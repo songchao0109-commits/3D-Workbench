@@ -336,6 +336,14 @@ export const skeletonRegistry = {
       : Array.from(runtimeMap.values());
     return runtimes.flatMap((runtime) => Array.from(runtime.ikControlTargets.values()));
   },
+  getHelperObjects() {
+    return Array.from(runtimeMap.values()).flatMap((runtime) => [
+      runtime.helper,
+      ...Array.from(runtime.boneHandles.values()),
+      ...Array.from(runtime.ikControlTargets.values()),
+      ...Array.from(runtime.ikTargets.values()),
+    ]);
+  },
   solveChain(objectId: string, chainId: string, rig?: ObjectRig) {
     const runtime = runtimeMap.get(objectId);
     if (!runtime || !rig) {

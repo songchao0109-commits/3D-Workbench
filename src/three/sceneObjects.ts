@@ -121,7 +121,7 @@ export function createCameraMarker() {
     new THREE.MeshStandardMaterial({ color: 0x4fa3ff, roughness: 0.25 }),
   );
   lens.rotation.x = Math.PI / 2;
-  lens.position.z = -0.2;
+  lens.position.z = 0.2;
 
   group.add(body, lens);
   return group;

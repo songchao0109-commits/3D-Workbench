@@ -40,7 +40,13 @@ function isEditableTarget(target: EventTarget | null) {
   return Boolean(target.closest("input, textarea, select, [contenteditable='true']"));
 }
 
-export function BottomToolbar() {
+export function BottomToolbar({
+  lifted = false,
+  liftedHeight = 420,
+}: {
+  lifted?: boolean;
+  liftedHeight?: number;
+}) {
   const toolbarRef = useRef<HTMLElement>(null);
   const glbInputRef = useRef<HTMLInputElement>(null);
   const panoramaInputRef = useRef<HTMLInputElement>(null);
@@ -170,7 +176,12 @@ export function BottomToolbar() {
   };
 
   return (
-    <nav className="bottom-toolbar" aria-label="工作台工具" ref={toolbarRef}>
+    <nav
+      className={`bottom-toolbar ${lifted ? "is-lifted" : "is-docked"}`}
+      aria-label="工作台工具"
+      ref={toolbarRef}
+      style={lifted ? { bottom: `${Math.max(52, liftedHeight + 12)}px` } : undefined}
+    >
       <input
         ref={glbInputRef}
         className="file-input"

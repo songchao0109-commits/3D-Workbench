@@ -15,6 +15,7 @@ import {
 import * as THREE from "three";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { resolveCameraTarget } from "../../domain/cameraTargets";
+import { resolvePlaybackCameraId } from "../../domain/animationTimeline";
 import type {
   CameraMode,
   CameraTargetMode,
@@ -98,6 +99,7 @@ function CameraPreview({
 
 export function CameraInspector() {
   const targetInputRef = useRef<HTMLInputElement>(null);
+  const animation = useProjectStore((state) => state.animation);
   const selectedCameraId = useProjectStore((state) => state.selectedCameraId);
   const activeCameraId = useProjectStore((state) => state.activeCameraId);
   const cameras = useProjectStore((state) => state.cameras);
@@ -116,9 +118,24 @@ export function CameraInspector() {
   const [targetSearch, setTargetSearch] = useState("");
   const [targetSuggestOpen, setTargetSuggestOpen] = useState(false);
   const [previewImage, setPreviewImage] = useState<string>();
+  const inspectedCameraId = useMemo(() => {
+    if (animation.isPlaying) {
+      return resolvePlaybackCameraId(
+        animation.cameraCuts,
+        animation.currentTime,
+        activeCameraId,
+      );
+    }
+    return selectedCameraId ?? activeCameraId;
+  }, [
+    activeCameraId,
+    animation.cameraCuts,
+    animation.currentTime,
+    animation.isPlaying,
+    selectedCameraId,
+  ]);
   const camera =
-    cameras.find((item) => item.id === selectedCameraId) ??
-    cameras.find((item) => item.id === activeCameraId) ??
+    cameras.find((item) => item.id === inspectedCameraId) ??
     cameras[0];
   const resolvedTarget = camera
     ? resolveCameraTarget(camera, objects, cameras)
@@ -142,13 +159,17 @@ export function CameraInspector() {
     const handlePreview = (event: Event) => {
       const detail = (event as CustomEvent<{ cameraId: string; imageDataUrl: string }>)
         .detail;
-      if (detail.cameraId === activeCameraId) {
+      if (detail.cameraId === camera?.id) {
         setPreviewImage(detail.imageDataUrl);
       }
     };
     window.addEventListener("camera-preview-frame", handlePreview);
     return () => window.removeEventListener("camera-preview-frame", handlePreview);
-  }, [activeCameraId]);
+  }, [camera?.id]);
+
+  useEffect(() => {
+    setPreviewImage(undefined);
+  }, [camera?.id]);
 
   const targetCandidates = useMemo(() => {
     const query = targetSearch.trim().toLowerCase();
@@ -234,7 +255,13 @@ export function CameraInspector() {
       <div className="panel-heading object-heading">
         <div>
           <h2>相机属性</h2>
-          <p>{cameraPreviewActive ? "摄影机视角预览中" : "机位资产"}</p>
+          <p>
+            {animation.isPlaying
+              ? "播放中，属性区跟随当前时间线机位"
+              : cameraPreviewActive
+                ? "摄影机视角预览中"
+                : "机位资产"}
+          </p>
         </div>
         <div className="object-actions">
           <button
