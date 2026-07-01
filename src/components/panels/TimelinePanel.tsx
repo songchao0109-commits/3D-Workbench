@@ -1147,76 +1147,80 @@ export function TimelinePanel({
       {expanded ? (
         <div className="timeline-panel-body">
           <div className="timeline-editor-toolbar">
-            <button className="timeline-editor-title" type="button" onClick={onToggle}>
-              <Video size={15} />
-              <strong>关键帧动画</strong>
-              <ChevronDown size={15} />
-            </button>
-            <label className="timeline-fps-field">
-              <span>帧率:</span>
-              <select
-                value={animation.fps}
-                onChange={(event) => setAnimationFps(Number(event.target.value))}
+            <div className="timeline-toolbar-left">
+              <button className="timeline-editor-title" type="button" onClick={onToggle}>
+                <Video size={15} />
+                <strong>关键帧动画</strong>
+                <ChevronDown size={15} />
+              </button>
+              <label className="timeline-fps-field">
+                <span>帧率:</span>
+                <select
+                  value={animation.fps}
+                  onChange={(event) => setAnimationFps(Number(event.target.value))}
+                >
+                  {[24, 25, 30].map((fps) => (
+                    <option key={fps} value={fps}>
+                      {fps}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <div className="timeline-toolbar-right">
+              <div className="timeline-playback-group">
+                <button type="button" onClick={() => moveToAdjacentKeyframe(-1)}>
+                  <SkipBack size={14} />
+                  <span>上一关键帧</span>
+                </button>
+                <button
+                  type="button"
+                  onPointerDown={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    toggleAnimationPlayback();
+                  }}
+                >
+                  {animation.isPlaying ? <Pause size={14} /> : <Play size={14} />}
+                  <span>{animation.isPlaying ? "暂停" : "播放"}</span>
+                </button>
+                <button type="button" onClick={() => moveToAdjacentKeyframe(1)}>
+                  <SkipForward size={14} />
+                  <span>下一关键帧</span>
+                </button>
+              </div>
+              <button
+                className={`timeline-auto-key-button ${
+                  animation.autoKeyEnabled ? "is-active" : ""
+                }`}
+                type="button"
+                onClick={() => setAnimationAutoKeyEnabled(!animation.autoKeyEnabled)}
               >
-                {[24, 25, 30].map((fps) => (
-                  <option key={fps} value={fps}>
-                    {fps}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <div className="timeline-playback-group">
-              <button type="button" onClick={() => moveToAdjacentKeyframe(-1)}>
-                <SkipBack size={14} />
-                <span>上一关键帧</span>
+                <Circle size={10} />
+                <span>自动关键帧</span>
+              </button>
+              <button className="timeline-primary-button" type="button" onClick={handleCapture}>
+                <KeyRound size={14} />
+                <span>手动插帧</span>
               </button>
               <button
+                className="timeline-ghost-button"
+                disabled={!selectedKeyframe}
                 type="button"
-                onPointerDown={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  toggleAnimationPlayback();
-                }}
+                onClick={handleDeleteSelectedKeyframe}
               >
-                {animation.isPlaying ? <Pause size={14} /> : <Play size={14} />}
-                <span>{animation.isPlaying ? "暂停" : "播放"}</span>
+                <Trash2 size={14} />
+                <span>删除</span>
               </button>
-              <button type="button" onClick={() => moveToAdjacentKeyframe(1)}>
-                <SkipForward size={14} />
-                <span>下一关键帧</span>
+              <button
+                className="timeline-ghost-button"
+                type="button"
+                onClick={openExportDialog}
+              >
+                <Download size={14} />
+                <span>导出视频</span>
               </button>
             </div>
-            <button
-              className={`timeline-auto-key-button ${
-                animation.autoKeyEnabled ? "is-active" : ""
-              }`}
-              type="button"
-              onClick={() => setAnimationAutoKeyEnabled(!animation.autoKeyEnabled)}
-            >
-              <Circle size={10} />
-              <span>自动关键帧</span>
-            </button>
-            <button className="timeline-primary-button" type="button" onClick={handleCapture}>
-              <KeyRound size={14} />
-              <span>手动插帧</span>
-            </button>
-            <button
-              className="timeline-ghost-button"
-              disabled={!selectedKeyframe}
-              type="button"
-              onClick={handleDeleteSelectedKeyframe}
-            >
-              <Trash2 size={14} />
-              <span>删除</span>
-            </button>
-            <button
-              className="timeline-ghost-button"
-              type="button"
-              onClick={openExportDialog}
-            >
-              <Download size={14} />
-              <span>导出视频</span>
-            </button>
           </div>
 
           {exportDialogOpen ? (
