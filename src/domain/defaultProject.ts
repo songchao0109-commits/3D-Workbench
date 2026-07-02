@@ -69,6 +69,8 @@ export const defaultProject: ProjectState = {
     fps: 24,
     duration: 6,
     currentTime: 0,
+    inPointTime: undefined,
+    outPointTime: undefined,
     isPlaying: false,
     loop: false,
     autoKeyEnabled: false,

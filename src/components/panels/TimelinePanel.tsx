@@ -42,6 +42,11 @@ type TimelineDisplayKeyframe = {
   label?: string;
 };
 
+type VisibleTimelineNode = {
+  depth: number;
+  node: TimelineTreeNode;
+};
+
 type TimelineCameraClip = {
   id: string;
   cameraId: string;
@@ -92,6 +97,59 @@ function formatTimecode(time: number, fps: number) {
     .padStart(2, "0")}`;
 }
 
+function formatSeconds(seconds: number) {
+  return Number(seconds.toFixed(2)).toString();
+}
+
+function isEditableTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+  return Boolean(target.closest("input, textarea, select, [contenteditable='true']"));
+}
+
+function clampFrameValue(value: number, maxFrame: number) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.min(maxFrame, Math.max(0, Math.round(value)));
+}
+
+function normalizeExportFrameRange(
+  startFrame: number,
+  endFrame: number,
+  maxFrame: number,
+) {
+  if (maxFrame <= 0) {
+    return {
+      startFrame: 0,
+      endFrame: 1,
+    };
+  }
+
+  const nextStartFrame = clampFrameValue(startFrame, maxFrame);
+  const nextEndFrame = clampFrameValue(endFrame, maxFrame);
+
+  if (nextEndFrame > nextStartFrame) {
+    return {
+      startFrame: nextStartFrame,
+      endFrame: nextEndFrame,
+    };
+  }
+
+  if (nextStartFrame >= maxFrame) {
+    return {
+      startFrame: Math.max(0, maxFrame - 1),
+      endFrame: maxFrame,
+    };
+  }
+
+  return {
+    startFrame: nextStartFrame,
+    endFrame: Math.min(maxFrame, nextStartFrame + 1),
+  };
+}
+
 export function TimelinePanel({
   expanded,
   height,
@@ -111,6 +169,16 @@ export function TimelinePanel({
   const cameras = useProjectStore((state) => state.cameras);
   const setAnimationTime = useProjectStore((state) => state.setAnimationTime);
   const setAnimationFps = useProjectStore((state) => state.setAnimationFps);
+  const setAnimationInPoint = useProjectStore((state) => state.setAnimationInPoint);
+  const setAnimationOutPoint = useProjectStore((state) => state.setAnimationOutPoint);
+  const clearAnimationInPoint = useProjectStore((state) => state.clearAnimationInPoint);
+  const clearAnimationOutPoint = useProjectStore((state) => state.clearAnimationOutPoint);
+  const setAnimationInPointToCurrentTime = useProjectStore(
+    (state) => state.setAnimationInPointToCurrentTime,
+  );
+  const setAnimationOutPointToCurrentTime = useProjectStore(
+    (state) => state.setAnimationOutPointToCurrentTime,
+  );
   const addCameraCutAtTime = useProjectStore((state) => state.addCameraCutAtTime);
   const toggleAnimationPlayback = useProjectStore(
     (state) => state.toggleAnimationPlayback,
@@ -149,20 +217,26 @@ export function TimelinePanel({
     laneLeft: number;
     laneWidth: number;
   } | null>(null);
-  const [seekingTimeline, setSeekingTimeline] = useState<{
+  const [seekingTimeline, setSeekingTimeline] = useState(false);
+  const [draggingRangePoint, setDraggingRangePoint] = useState<{
+    type: "in" | "out";
     laneLeft: number;
     laneWidth: number;
   } | null>(null);
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
   const [exportStart, setExportStart] = useState("0");
   const [exportEnd, setExportEnd] = useState("");
+  const [exportRangeCustomized, setExportRangeCustomized] = useState(false);
   const [exportError, setExportError] = useState("");
   const [cameraMenuOpen, setCameraMenuOpen] = useState(false);
   const [lastEditedKeyframeIds, setLastEditedKeyframeIds] = useState<string[]>([]);
   const previousBindingsRef = useRef(animation.bindings);
   const cameraMenuRef = useRef<HTMLDivElement>(null);
   const timelineScrollRef = useRef<HTMLDivElement>(null);
+  const timelineLeftListRef = useRef<HTMLDivElement>(null);
+  const timelineRightListRef = useRef<HTMLDivElement>(null);
   const resizeStateRef = useRef<{ startY: number; startHeight: number } | null>(null);
+  const syncingTrackScrollRef = useRef<"left" | "right" | null>(null);
   const timelinePanStateRef = useRef<{
     startClientX: number;
     startClientY: number;
@@ -366,6 +440,19 @@ export function TimelinePanel({
     return "请选择对象、机位或骨骼控制节点";
   }, [activeCamera, activeObject]);
 
+  const ioRange = useMemo(() => {
+    const startTime = animation.inPointTime ?? 0;
+    const endTime = animation.outPointTime ?? animation.duration;
+    return {
+      startTime,
+      endTime,
+      hasInPoint: animation.inPointTime !== undefined,
+      hasOutPoint: animation.outPointTime !== undefined,
+      hasVisibleRange:
+        animation.inPointTime !== undefined || animation.outPointTime !== undefined,
+    };
+  }, [animation.duration, animation.inPointTime, animation.outPointTime]);
+
   const collectKeyframeIdsAtTime = (
     targetType: "object" | "camera",
     targetId: string,
@@ -402,7 +489,70 @@ export function TimelinePanel({
   const handleCameraCutCapture = (cameraId?: string) => {
     const result = cameraId ? addCameraCutAtTime(cameraId) : addCurrentCameraCut();
     setCameraMenuOpen(false);
-    setFeedback(result.ok ? "已添加机位切换" : result.message);
+    setFeedback(result.ok ? "已添加机位序列" : result.message);
+  };
+
+  const handleSetInPoint = () => {
+    const shouldClear =
+      animation.inPointTime !== undefined &&
+      Math.abs(animation.inPointTime - animation.currentTime) < 0.0001;
+    setAnimationInPointToCurrentTime();
+    setFeedback(shouldClear ? "已清除入点" : "已设置入点");
+  };
+
+  const handleSetOutPoint = () => {
+    const shouldClear =
+      animation.outPointTime !== undefined &&
+      Math.abs(animation.outPointTime - animation.currentTime) < 0.0001;
+    setAnimationOutPointToCurrentTime();
+    setFeedback(shouldClear ? "已清除出点" : "已设置出点");
+  };
+
+  const handleClearInPoint = useCallback(() => {
+    clearAnimationInPoint();
+    setFeedback("已清除入点");
+  }, [clearAnimationInPoint]);
+
+  const handleClearOutPoint = useCallback(() => {
+    clearAnimationOutPoint();
+    setFeedback("已清除出点");
+  }, [clearAnimationOutPoint]);
+
+  const updateRangePointAtClientX = useCallback((
+    type: "in" | "out",
+    clientX: number,
+    laneLeft: number,
+    laneWidth: number,
+  ) => {
+    const relativeX = Math.min(laneWidth, Math.max(0, clientX - laneLeft));
+    const nextTime = (relativeX / Math.max(laneWidth, 1)) * animation.duration;
+    if (type === "in") {
+      setAnimationInPoint(nextTime);
+      setFeedback(`入点：第 ${formatFrameLabel(nextTime, animation.fps)} 帧`);
+      return;
+    }
+    setAnimationOutPoint(nextTime);
+    setFeedback(`出点：第 ${formatFrameLabel(nextTime, animation.fps)} 帧`);
+  }, [animation.duration, animation.fps, setAnimationInPoint, setAnimationOutPoint]);
+
+  const handleRangePointPointerDown = (
+    event: ReactPointerEvent<HTMLButtonElement>,
+    type: "in" | "out",
+  ) => {
+    if (event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const laneRect = event.currentTarget.parentElement?.getBoundingClientRect();
+    if (!laneRect) {
+      return;
+    }
+    setDraggingRangePoint({
+      type,
+      laneLeft: laneRect.left,
+      laneWidth: laneRect.width,
+    });
   };
 
   useEffect(() => {
@@ -480,6 +630,26 @@ export function TimelinePanel({
     window.addEventListener("keydown", handleKeydown);
     return () => window.removeEventListener("keydown", handleKeydown);
   }, [selectedKeyframe]);
+
+  useEffect(() => {
+    const handleKeydown = (event: KeyboardEvent) => {
+      if (event.metaKey || event.ctrlKey || event.altKey || isEditableTarget(event.target)) {
+        return;
+      }
+      const key = event.key.toLowerCase();
+      if (key !== "i" && key !== "o") {
+        return;
+      }
+      event.preventDefault();
+      if (key === "i") {
+        handleSetInPoint();
+        return;
+      }
+      handleSetOutPoint();
+    };
+    window.addEventListener("keydown", handleKeydown);
+    return () => window.removeEventListener("keydown", handleKeydown);
+  }, [handleSetInPoint, handleSetOutPoint]);
 
   useEffect(() => {
     if (previousBindingsRef.current === animation.bindings) {
@@ -571,6 +741,32 @@ export function TimelinePanel({
     };
   }, [animation.duration, resizingCameraClip, resizeCameraCutClip]);
 
+  useEffect(() => {
+    if (!draggingRangePoint) {
+      return undefined;
+    }
+
+    const handlePointerMove = (event: PointerEvent) => {
+      updateRangePointAtClientX(
+        draggingRangePoint.type,
+        event.clientX,
+        draggingRangePoint.laneLeft,
+        draggingRangePoint.laneWidth,
+      );
+    };
+
+    const handlePointerUp = () => {
+      setDraggingRangePoint(null);
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+    };
+  }, [draggingRangePoint, updateRangePointAtClientX]);
+
   const seekTimelineAtClientX = useCallback((
     clientX: number,
     laneLeft: number,
@@ -580,21 +776,56 @@ export function TimelinePanel({
     setAnimationTime((relativeX / Math.max(laneWidth, 1)) * animation.duration);
   }, [animation.duration, setAnimationTime]);
 
+  const scrollTimelinePaneForPointer = useCallback((clientX: number) => {
+    const scrollPane = timelineScrollRef.current;
+    if (!scrollPane) {
+      return;
+    }
+    const rect = scrollPane.getBoundingClientRect();
+    const threshold = 56;
+    const maxScrollLeft = Math.max(0, scrollPane.scrollWidth - scrollPane.clientWidth);
+
+    if (clientX >= rect.right - threshold && scrollPane.scrollLeft < maxScrollLeft) {
+      const distance = rect.right - clientX;
+      const strength = Math.max(0, threshold - Math.max(distance, 0)) / threshold;
+      scrollPane.scrollLeft = Math.min(
+        maxScrollLeft,
+        scrollPane.scrollLeft + Math.max(8, strength * 24),
+      );
+      return;
+    }
+
+    if (clientX <= rect.left + threshold && scrollPane.scrollLeft > 0) {
+      const distance = clientX - rect.left;
+      const strength = Math.max(0, threshold - Math.max(distance, 0)) / threshold;
+      scrollPane.scrollLeft = Math.max(
+        0,
+        scrollPane.scrollLeft - Math.max(8, strength * 24),
+      );
+    }
+  }, []);
+
+  const seekTimelineAtPointer = useCallback((clientX: number) => {
+    scrollTimelinePaneForPointer(clientX);
+    const laneElement = timelineScrollRef.current?.querySelector(".timeline-ruler");
+    if (!(laneElement instanceof HTMLElement)) {
+      return;
+    }
+    const laneRect = laneElement.getBoundingClientRect();
+    seekTimelineAtClientX(clientX, laneRect.left, laneRect.width);
+  }, [scrollTimelinePaneForPointer, seekTimelineAtClientX]);
+
   useEffect(() => {
     if (!seekingTimeline) {
       return undefined;
     }
 
     const handlePointerMove = (event: PointerEvent) => {
-      seekTimelineAtClientX(
-        event.clientX,
-        seekingTimeline.laneLeft,
-        seekingTimeline.laneWidth,
-      );
+      seekTimelineAtPointer(event.clientX);
     };
 
     const handlePointerUp = () => {
-      setSeekingTimeline(null);
+      setSeekingTimeline(false);
     };
 
     window.addEventListener("pointermove", handlePointerMove);
@@ -603,7 +834,7 @@ export function TimelinePanel({
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", handlePointerUp);
     };
-  }, [animation.duration, seekingTimeline, setAnimationTime]);
+  }, [seekTimelineAtPointer, seekingTimeline]);
 
   const handleTimelineSeekPointerDown = (event: ReactPointerEvent<HTMLElement>) => {
     if (event.button !== 0) {
@@ -612,10 +843,7 @@ export function TimelinePanel({
     event.preventDefault();
     const laneRect = event.currentTarget.getBoundingClientRect();
     seekTimelineAtClientX(event.clientX, laneRect.left, laneRect.width);
-    setSeekingTimeline({
-      laneLeft: laneRect.left,
-      laneWidth: laneRect.width,
-    });
+    setSeekingTimeline(true);
   };
 
   useEffect(() => {
@@ -721,6 +949,19 @@ export function TimelinePanel({
     return Array.from(times).sort((left, right) => left - right);
   }, [bindingRows, cameraCutClips]);
 
+  const visibleTimelineNodes = useMemo<VisibleTimelineNode[]>(() => {
+    const rows: VisibleTimelineNode[] = [];
+    const appendNode = (node: TimelineTreeNode, depth = 0) => {
+      rows.push({ node, depth });
+      if (!node.children?.length || !expandedNodes[node.id]) {
+        return;
+      }
+      node.children.forEach((child) => appendNode(child, depth + 1));
+    };
+    timelineTree.forEach((node) => appendNode(node));
+    return rows;
+  }, [expandedNodes, timelineTree]);
+
   const moveToAdjacentKeyframe = (direction: -1 | 1) => {
     const epsilon = 0.0001;
     const candidates =
@@ -733,23 +974,75 @@ export function TimelinePanel({
     }
   };
 
-  const getExportUnitMax = () => Math.round(animation.duration * animation.fps);
+  const getExportUnitMax = useCallback(
+    () => Math.round(animation.duration * animation.fps),
+    [animation.duration, animation.fps],
+  );
+
+  const getDefaultExportFrames = useCallback(() => {
+    const maxFrame = getExportUnitMax();
+    if (ioRange.hasInPoint || ioRange.hasOutPoint) {
+      return normalizeExportFrameRange(
+        Math.round((animation.inPointTime ?? 0) * animation.fps),
+        Math.round((animation.outPointTime ?? animation.duration) * animation.fps),
+        maxFrame,
+      );
+    }
+    return normalizeExportFrameRange(
+      0,
+      Math.round(Math.min(animation.duration, 15) * animation.fps),
+      maxFrame,
+    );
+  }, [
+    animation.duration,
+    animation.fps,
+    animation.inPointTime,
+    animation.outPointTime,
+    getExportUnitMax,
+    ioRange.hasInPoint,
+    ioRange.hasOutPoint,
+  ]);
+
+  const getCurrentExportFrames = useCallback(() => {
+    const fallback = getDefaultExportFrames();
+    const startValue = Number(exportStart);
+    const endValue = Number(exportEnd);
+    if (!Number.isFinite(startValue) || !Number.isFinite(endValue)) {
+      return fallback;
+    }
+    return normalizeExportFrameRange(startValue, endValue, getExportUnitMax());
+  }, [exportEnd, exportStart, getDefaultExportFrames, getExportUnitMax]);
+
+  const applyExportFrameRange = useCallback((startFrame: number, endFrame: number) => {
+    setExportStart(startFrame.toString());
+    setExportEnd(endFrame.toString());
+    setExportError("");
+  }, []);
 
   const openExportDialog = () => {
-    setExportStart("0");
-    setExportEnd(getExportUnitMax().toString());
-    setExportError("");
+    const nextRange = exportRangeCustomized
+      ? getCurrentExportFrames()
+      : getDefaultExportFrames();
+    applyExportFrameRange(nextRange.startFrame, nextRange.endFrame);
     setExportDialogOpen(true);
   };
 
   useEffect(() => {
-    if (!exportDialogOpen) {
+    if (!exportDialogOpen || exportRangeCustomized) {
       return;
     }
-    setExportStart("0");
-    setExportEnd(getExportUnitMax().toString());
-    setExportError("");
-  }, [animation.duration, animation.fps, exportDialogOpen]);
+    const nextRange = getDefaultExportFrames();
+    applyExportFrameRange(nextRange.startFrame, nextRange.endFrame);
+  }, [
+    animation.duration,
+    animation.fps,
+    animation.inPointTime,
+    animation.outPointTime,
+    applyExportFrameRange,
+    exportDialogOpen,
+    exportRangeCustomized,
+    getDefaultExportFrames,
+  ]);
 
   const buildExportRange = (): AnimationExportRange | undefined => {
     const startValue = Number(exportStart);
@@ -765,10 +1058,8 @@ export function TimelinePanel({
 
     const fps = animation.fps;
     const maxFrame = Math.round(animation.duration * fps);
-    const startFrame = Math.round(startValue);
-    const endFrame = Math.round(endValue);
-    const clampedStartFrame = Math.min(maxFrame, Math.max(0, startFrame));
-    const clampedEndFrame = Math.min(maxFrame, Math.max(0, endFrame));
+    const { startFrame: clampedStartFrame, endFrame: clampedEndFrame } =
+      normalizeExportFrameRange(startValue, endValue, maxFrame);
 
     if (clampedEndFrame <= clampedStartFrame) {
       setExportError("结束点位必须晚于起始点位");
@@ -835,6 +1126,21 @@ export function TimelinePanel({
       clip.endTime,
       animation.fps,
     )}`;
+
+  const getIoMarkerTitle = (type: "in" | "out", time: number) =>
+    `${type === "in" ? "入点" : "出点"} · 第 ${formatFrameLabel(
+      time,
+      animation.fps,
+    )} 帧 · ${formatTimecode(time, animation.fps)}`;
+
+  const exportDurationSeconds = useMemo(() => {
+    const range = exportRangeCustomized
+      ? getCurrentExportFrames()
+      : getDefaultExportFrames();
+    return range
+      ? formatSeconds(Math.max(0, (range.endFrame - range.startFrame + 1) / Math.max(animation.fps, 1)))
+      : "0";
+  }, [animation.fps, exportRangeCustomized, getCurrentExportFrames, getDefaultExportFrames]);
 
   const handleKeyframePointerDown = (
     event: ReactPointerEvent<HTMLButtonElement>,
@@ -909,7 +1215,7 @@ export function TimelinePanel({
       onPointerDown={handleTimelineLanePointerDown}
     >
       {!cameraCutClips.length ? (
-        <span className="timeline-camera-empty">未添加任何机位</span>
+        <span className="timeline-camera-empty">未添机位序列</span>
       ) : null}
       {cameraCutClips.map((clip) => {
         const left = (clip.startTime / Math.max(animation.duration, 0.001)) * 100;
@@ -1026,12 +1332,76 @@ export function TimelinePanel({
     </div>
   );
 
-  const renderTreeNode = (node: TimelineTreeNode, depth = 0) => {
+  const renderIoRange = () => {
+    if (!ioRange.hasVisibleRange) {
+      return null;
+    }
+
+    const left = (ioRange.startTime / Math.max(animation.duration, 0.001)) * 100;
+    const width =
+      ((ioRange.endTime - ioRange.startTime) / Math.max(animation.duration, 0.001)) * 100;
+
+    return (
+      <div
+        className="timeline-io-range"
+        style={{
+          left: `${left}%`,
+          width: `${Math.max(width, 0)}%`,
+        }}
+      />
+    );
+  };
+
+  const renderIoMarkers = () => (
+    <>
+      {animation.inPointTime !== undefined ? (
+        <button
+          aria-label="拖拽或双击取消入点"
+          className={`timeline-io-marker is-in ${
+            draggingRangePoint?.type === "in" ? "is-dragging" : ""
+          }`}
+          style={{
+            left: `${(animation.inPointTime / Math.max(animation.duration, 0.001)) * 100}%`,
+          }}
+          title={getIoMarkerTitle("in", animation.inPointTime)}
+          type="button"
+          onDoubleClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            handleClearInPoint();
+          }}
+          onPointerDown={(event) => handleRangePointPointerDown(event, "in")}
+        >
+          I
+        </button>
+      ) : null}
+      {animation.outPointTime !== undefined ? (
+        <button
+          aria-label="拖拽或双击取消出点"
+          className={`timeline-io-marker is-out ${
+            draggingRangePoint?.type === "out" ? "is-dragging" : ""
+          }`}
+          style={{
+            left: `${(animation.outPointTime / Math.max(animation.duration, 0.001)) * 100}%`,
+          }}
+          title={getIoMarkerTitle("out", animation.outPointTime)}
+          type="button"
+          onDoubleClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            handleClearOutPoint();
+          }}
+          onPointerDown={(event) => handleRangePointPointerDown(event, "out")}
+        >
+          O
+        </button>
+      ) : null}
+    </>
+  );
+
+  const getVisibleNodeKeyframes = (node: TimelineTreeNode) => {
     const hasChildren = Boolean(node.children?.length);
     const isExpanded = Boolean(expandedNodes[node.id]);
-    const laneClassName = node.laneClassName ?? "timeline-track-lane";
-    const labelClassName =
-      node.kind === "channel" ? "timeline-track-meta timeline-node-meta" : "timeline-binding-toggle";
     const subtitleVisible = !(hasChildren && isExpanded);
     const suppressAggregatePreview =
       Boolean(draggingKeyframe) &&
@@ -1040,48 +1410,88 @@ export function TimelinePanel({
       hasChildren;
     const visibleKeyframes = suppressAggregatePreview ? [] : node.keyframes;
 
-    return (
-      <div className={`timeline-node-group depth-${depth}`} key={node.id}>
-        <div className={`timeline-track-row timeline-node-row timeline-node-${node.kind}`}>
-          {hasChildren ? (
-            <button
-              aria-expanded={isExpanded}
-              className={labelClassName}
-              style={{ "--timeline-indent": `${depth * 16}px` } as CSSProperties}
-              type="button"
-              onPointerDown={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                toggleNodeExpanded(node.id);
-              }}
-            >
-              {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-              <span className="timeline-binding-name">{node.label}</span>
-              {subtitleVisible && node.subtitle ? <small>{node.subtitle}</small> : null}
-            </button>
-          ) : (
-            <div
-              className={labelClassName}
-              style={{ "--timeline-indent": `${depth * 16}px` } as CSSProperties}
-            >
-              <span className="timeline-node-bullet" />
-              <strong>{node.label}</strong>
-              {node.subtitle ? <span>{node.subtitle}</span> : null}
-            </div>
-          )}
-          {renderLane(
-            visibleKeyframes,
-            laneClassName,
-            node.kind === "summary",
-            Boolean(visibleKeyframes.length),
-          )}
-        </div>
+    return {
+      subtitleVisible,
+      visibleKeyframes,
+    };
+  };
 
-        {hasChildren && isExpanded
-          ? node.children?.map((child) => renderTreeNode(child, depth + 1))
-          : null}
+  const renderTreeLabel = ({ node, depth }: VisibleTimelineNode) => {
+    const hasChildren = Boolean(node.children?.length);
+    const isExpanded = Boolean(expandedNodes[node.id]);
+    const labelClassName =
+      node.kind === "channel" ? "timeline-track-meta timeline-node-meta" : "timeline-binding-toggle";
+    const { subtitleVisible } = getVisibleNodeKeyframes(node);
+
+    return (
+      <div className={`timeline-label-row timeline-node-${node.kind}`} key={`label:${node.id}`}>
+        {hasChildren ? (
+          <button
+            aria-expanded={isExpanded}
+            className={labelClassName}
+            style={{ "--timeline-indent": `${depth * 16}px` } as CSSProperties}
+            type="button"
+            onPointerDown={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              toggleNodeExpanded(node.id);
+            }}
+          >
+            {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            <span className="timeline-binding-name">{node.label}</span>
+            {subtitleVisible && node.subtitle ? <small>{node.subtitle}</small> : null}
+          </button>
+        ) : (
+          <div
+            className={labelClassName}
+            style={{ "--timeline-indent": `${depth * 16}px` } as CSSProperties}
+          >
+            <span className="timeline-node-bullet" />
+            <strong>{node.label}</strong>
+            {node.subtitle ? <span>{node.subtitle}</span> : null}
+          </div>
+        )}
       </div>
     );
+  };
+
+  const renderTreeLane = ({ node, depth }: VisibleTimelineNode) => {
+    const laneClassName = node.laneClassName ?? "timeline-track-lane";
+    const { visibleKeyframes } = getVisibleNodeKeyframes(node);
+
+    return (
+      <div className={`timeline-lane-row timeline-node-group depth-${depth}`} key={`lane:${node.id}`}>
+        {renderLane(
+          visibleKeyframes,
+          laneClassName,
+          node.kind === "summary",
+          Boolean(visibleKeyframes.length),
+        )}
+      </div>
+    );
+  };
+
+  const syncTrackScroll = (source: "left" | "right") => {
+    const sourceElement =
+      source === "left" ? timelineLeftListRef.current : timelineRightListRef.current;
+    const targetElement =
+      source === "left" ? timelineRightListRef.current : timelineLeftListRef.current;
+    const targetSide = source === "left" ? "right" : "left";
+
+    if (!sourceElement || !targetElement) {
+      return;
+    }
+    if (syncingTrackScrollRef.current === source) {
+      syncingTrackScrollRef.current = null;
+      return;
+    }
+    syncingTrackScrollRef.current = targetSide;
+    targetElement.scrollTop = sourceElement.scrollTop;
+    requestAnimationFrame(() => {
+      if (syncingTrackScrollRef.current === targetSide) {
+        syncingTrackScrollRef.current = null;
+      }
+    });
   };
 
   return (
@@ -1189,6 +1599,12 @@ export function TimelinePanel({
                   <span>下一关键帧</span>
                 </button>
               </div>
+              <button className="timeline-ghost-button" type="button" onClick={handleSetInPoint}>
+                <span>入点 I</span>
+              </button>
+              <button className="timeline-ghost-button" type="button" onClick={handleSetOutPoint}>
+                <span>出点 O</span>
+              </button>
               <button
                 className={`timeline-auto-key-button ${
                   animation.autoKeyEnabled ? "is-active" : ""
@@ -1239,6 +1655,7 @@ export function TimelinePanel({
                     type="number"
                     value={exportStart}
                     onChange={(event) => {
+                      setExportRangeCustomized(true);
                       setExportStart(event.target.value);
                       setExportError("");
                     }}
@@ -1254,6 +1671,7 @@ export function TimelinePanel({
                     type="number"
                     value={exportEnd}
                     onChange={(event) => {
+                      setExportRangeCustomized(true);
                       setExportEnd(event.target.value);
                       setExportError("");
                     }}
@@ -1263,7 +1681,7 @@ export function TimelinePanel({
               </div>
               <div className="timeline-export-summary">
                 <span>帧率 {animation.fps} fps</span>
-                <span>范围 0-{getExportUnitMax()} 帧</span>
+                <span>视频时长 {exportDurationSeconds} s</span>
               </div>
               {exportError ? (
                 <div className="timeline-export-error">{exportError}</div>
@@ -1290,31 +1708,18 @@ export function TimelinePanel({
 
           <div
             className="timeline-editor-grid"
-            ref={timelineScrollRef}
-            style={
-              {
-                "--timeline-content-width": `${timelineContentWidth}px`,
-              } as CSSProperties
-            }
           >
             <div className="timeline-left-head timeline-timecode-head">
               <span className="timeline-timecode-value">
                 {formatTimecode(animation.currentTime, animation.fps)}
               </span>
             </div>
-            <div className="timeline-ruler" onPointerDown={handleTimelineSeekPointerDown}>
-              {rulerTicks.map((tick) => (
-                <span key={tick.key} style={{ left: tick.left }}>
-                  {tick.label}
-                </span>
-              ))}
-            </div>
             <div className="timeline-camera-label" ref={cameraMenuRef}>
-              <span>机位</span>
+              <span>机位序列</span>
               <button
                 className="timeline-camera-add-button"
                 type="button"
-                title="添加机位切换"
+                title="添加机位序列"
                 onClick={() => setCameraMenuOpen((current) => !current)}
               >
                 <Plus size={14} />
@@ -1336,10 +1741,41 @@ export function TimelinePanel({
                 </div>
               ) : null}
             </div>
-            {renderCameraLane()}
-            {renderGlobalPlayhead()}
-            <div className="timeline-track-list timeline-tree-list">
-              {timelineTree.map((node) => renderTreeNode(node))}
+            <div
+              className="timeline-track-list timeline-label-list"
+              ref={timelineLeftListRef}
+              onScroll={() => syncTrackScroll("left")}
+            >
+              {visibleTimelineNodes.map((item) => renderTreeLabel(item))}
+            </div>
+            <div className="timeline-scroll-pane" ref={timelineScrollRef}>
+              <div
+                className="timeline-scroll-content"
+                style={
+                  {
+                    "--timeline-content-width": `${timelineContentWidth}px`,
+                  } as CSSProperties
+                }
+              >
+                <div className="timeline-ruler" onPointerDown={handleTimelineSeekPointerDown}>
+                  {renderIoRange()}
+                  {rulerTicks.map((tick) => (
+                    <span className="timeline-ruler-tick" key={tick.key} style={{ left: tick.left }}>
+                      {tick.label}
+                    </span>
+                  ))}
+                  {renderIoMarkers()}
+                </div>
+                {renderCameraLane()}
+                <div
+                  className="timeline-track-list timeline-tree-list timeline-lane-list"
+                  ref={timelineRightListRef}
+                  onScroll={() => syncTrackScroll("right")}
+                >
+                  {visibleTimelineNodes.map((item) => renderTreeLane(item))}
+                </div>
+                {renderGlobalPlayhead()}
+              </div>
             </div>
           </div>
         </div>

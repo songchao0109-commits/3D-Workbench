@@ -207,6 +207,8 @@ export type AnimationTimelineState = {
   fps: number;
   duration: number;
   currentTime: number;
+  inPointTime?: number;
+  outPointTime?: number;
   isPlaying: boolean;
   loop: boolean;
   autoKeyEnabled: boolean;

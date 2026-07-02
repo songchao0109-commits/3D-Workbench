@@ -5,8 +5,11 @@ import {
   clampAnimationDuration,
   clampAnimationFps,
   clampAnimationTime,
+  clearAnimationInPoint,
+  clearAnimationOutPoint,
   moveCameraCuts,
   moveTimelineKeyframes,
+  normalizeAnimationRangePoints,
   resizeCameraCut,
   recordBoneRotationChannel,
   recordCameraChannels,
@@ -14,6 +17,8 @@ import {
   recordObjectTransformChannels,
   removeCameraCuts,
   removeTimelineKeyframes,
+  setAnimationInPoint,
+  setAnimationOutPoint,
   upsertAnimationCameraCut,
 } from "../domain/animationTimeline";
 import { defaultProject } from "../domain/defaultProject";
@@ -97,6 +102,12 @@ type ProjectStore = ProjectState & {
   setAnimationAutoKeyMode: (mode: ProjectState["animation"]["autoKeyMode"]) => void;
   setAnimationDuration: (duration: number) => void;
   setAnimationFps: (fps: number) => void;
+  setAnimationInPoint: (time: number) => void;
+  setAnimationOutPoint: (time: number) => void;
+  clearAnimationInPoint: () => void;
+  clearAnimationOutPoint: () => void;
+  setAnimationInPointToCurrentTime: () => void;
+  setAnimationOutPointToCurrentTime: () => void;
   stepAnimation: (deltaSeconds: number) => void;
   captureCurrentKeyframe: () => { ok: true } | { ok: false; message: string };
   addCurrentCameraCut: () => { ok: true } | { ok: false; message: string };
@@ -231,7 +242,7 @@ function captureCameraCut(state: ProjectState) {
 
 function captureCameraCutForCamera(state: ProjectState, cameraId?: string) {
   if (!cameraId) {
-    return { ok: false as const, message: "请先选择一个机位，再记录切换点" };
+    return { ok: false as const, message: "请先选择一个机位，再添加机位序列" };
   }
   return {
     ok: true as const,
@@ -966,26 +977,89 @@ export const useProjectStore = create<ProjectStore>((set) => ({
   setAnimationDuration: (duration) =>
     set((state) => {
       const nextDuration = clampAnimationDuration(duration);
+      const nextAnimation = normalizeAnimationRangePoints({
+        ...state.animation,
+        duration: nextDuration,
+      });
       const nextState = {
         ...state,
-        animation: {
-          ...state.animation,
-          duration: nextDuration,
-        },
+        animation: nextAnimation,
       };
       return applyAnimationState(nextState, state.animation.currentTime);
     }),
   setAnimationFps: (fps) =>
     set((state) => {
       const nextFps = clampAnimationFps(fps);
+      const nextAnimation = normalizeAnimationRangePoints({
+        ...state.animation,
+        fps: nextFps,
+      });
       const nextState = {
         ...state,
-        animation: {
-          ...state.animation,
-          fps: nextFps,
-        },
+        animation: nextAnimation,
       };
       return applyAnimationState(nextState, state.animation.currentTime);
+    }),
+  setAnimationInPoint: (time) =>
+    set((state) => ({
+      animation: setAnimationInPoint(state.animation, time),
+    })),
+  setAnimationOutPoint: (time) =>
+    set((state) => ({
+      animation: setAnimationOutPoint(state.animation, time),
+    })),
+  clearAnimationInPoint: () =>
+    set((state) => ({
+      animation: clearAnimationInPoint(state.animation),
+    })),
+  clearAnimationOutPoint: () =>
+    set((state) => ({
+      animation: clearAnimationOutPoint(state.animation),
+    })),
+  setAnimationInPointToCurrentTime: () =>
+    set((state) => {
+      const currentInPointTime =
+        state.animation.inPointTime === undefined
+          ? undefined
+          : clampAnimationTime(
+              state.animation.inPointTime,
+              state.animation.duration,
+              state.animation.fps,
+            );
+      const currentTime = clampAnimationTime(
+        state.animation.currentTime,
+        state.animation.duration,
+        state.animation.fps,
+      );
+      return {
+        animation:
+          currentInPointTime !== undefined && Math.abs(currentInPointTime - currentTime) < 0.0001
+            ? clearAnimationInPoint(state.animation)
+            : setAnimationInPoint(state.animation, currentTime),
+      };
+    }),
+  setAnimationOutPointToCurrentTime: () =>
+    set((state) => {
+      const currentOutPointTime =
+        state.animation.outPointTime === undefined
+          ? undefined
+          : clampAnimationTime(
+              state.animation.outPointTime,
+              state.animation.duration,
+              state.animation.fps,
+            );
+      const currentTime = clampAnimationTime(
+        state.animation.currentTime,
+        state.animation.duration,
+        state.animation.fps,
+      );
+      return {
+        animation:
+          currentOutPointTime !== undefined &&
+          Math.abs(currentOutPointTime - currentTime) < 0.0001
+            ? clearAnimationOutPoint(state.animation)
+            : setAnimationOutPoint(state.animation, currentTime),
+      };
     }),
   stepAnimation: (deltaSeconds) =>
     set((state) => {

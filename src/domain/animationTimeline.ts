@@ -7,6 +7,7 @@ import type {
   AnimationChannelPath,
   AnimationChannelValue,
   AnimationKeyframe,
+  AnimationTimelineState,
   TimelineKeyframeRef,
   ProjectState,
   SceneCamera,
@@ -62,6 +63,89 @@ export function quantizeAnimationTime(time: number, fps: number) {
 export function clampAnimationTime(time: number, duration: number, fps: number) {
   const quantized = quantizeAnimationTime(time, fps);
   return Math.min(clampAnimationDuration(duration), Math.max(0, quantized));
+}
+
+export function normalizeAnimationRangePoints(animation: AnimationTimelineState) {
+  const inPointTime =
+    animation.inPointTime === undefined
+      ? undefined
+      : clampAnimationTime(animation.inPointTime, animation.duration, animation.fps);
+  const outPointTime =
+    animation.outPointTime === undefined
+      ? undefined
+      : clampAnimationTime(animation.outPointTime, animation.duration, animation.fps);
+
+  if (
+    inPointTime !== undefined &&
+    outPointTime !== undefined &&
+    inPointTime >= outPointTime
+  ) {
+    return {
+      ...animation,
+      inPointTime,
+      outPointTime: undefined,
+    };
+  }
+
+  return {
+    ...animation,
+    inPointTime,
+    outPointTime,
+  };
+}
+
+export function setAnimationInPoint(
+  animation: AnimationTimelineState,
+  time: number,
+) {
+  const nextInPointTime = clampAnimationTime(time, animation.duration, animation.fps);
+  const currentOutPointTime =
+    animation.outPointTime === undefined
+      ? undefined
+      : clampAnimationTime(animation.outPointTime, animation.duration, animation.fps);
+
+  return {
+    ...animation,
+    inPointTime: nextInPointTime,
+    outPointTime:
+      currentOutPointTime !== undefined && nextInPointTime >= currentOutPointTime
+        ? undefined
+        : currentOutPointTime,
+  };
+}
+
+export function clearAnimationInPoint(animation: AnimationTimelineState) {
+  return {
+    ...animation,
+    inPointTime: undefined,
+  };
+}
+
+export function setAnimationOutPoint(
+  animation: AnimationTimelineState,
+  time: number,
+) {
+  const nextOutPointTime = clampAnimationTime(time, animation.duration, animation.fps);
+  const currentInPointTime =
+    animation.inPointTime === undefined
+      ? undefined
+      : clampAnimationTime(animation.inPointTime, animation.duration, animation.fps);
+
+  return {
+    ...animation,
+    inPointTime:
+      currentInPointTime !== undefined && nextOutPointTime <= currentInPointTime
+        ? undefined
+        : currentInPointTime,
+    outPointTime: nextOutPointTime,
+  };
+}
+
+export function clearAnimationOutPoint(animation: AnimationTimelineState) {
+  return {
+    ...animation,
+    outPointTime: undefined,
+  };
 }
 
 export function resolvePlaybackCameraId(
