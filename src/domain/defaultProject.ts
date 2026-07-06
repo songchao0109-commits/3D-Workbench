@@ -67,7 +67,7 @@ export const defaultProject: ProjectState = {
   snapshots: [],
   animation: {
     fps: 24,
-    duration: 6,
+    duration: 30,
     currentTime: 0,
     inPointTime: undefined,
     outPointTime: undefined,
