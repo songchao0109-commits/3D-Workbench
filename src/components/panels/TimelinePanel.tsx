@@ -1577,7 +1577,7 @@ export function TimelinePanel({
                 </select>
               </label>
             </div>
-            <div className="timeline-toolbar-right">
+            <div className="timeline-toolbar-center">
               <div className="timeline-playback-group">
                 <button type="button" onClick={() => moveToAdjacentKeyframe(-1)}>
                   <SkipBack size={14} />
@@ -1599,6 +1599,8 @@ export function TimelinePanel({
                   <span>下一关键帧</span>
                 </button>
               </div>
+            </div>
+            <div className="timeline-toolbar-actions">
               <button className="timeline-ghost-button" type="button" onClick={handleSetInPoint}>
                 <span>入点 I</span>
               </button>
