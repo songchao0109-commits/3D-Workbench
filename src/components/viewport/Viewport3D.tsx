@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
@@ -55,6 +55,22 @@ type SceneInsertRequest =
       variant: "cube" | "sphere" | "cylinder" | "torus" | "cone" | "pyramid";
     };
 
+type OrientationAxis = {
+  id: "x" | "y" | "z";
+  label: "X" | "Y" | "Z";
+  x: number;
+  y: number;
+  length: number;
+  angle: number;
+  depth: number;
+};
+
+const defaultOrientationAxes: OrientationAxis[] = [
+  { id: "x", label: "X", x: 18, y: 0, length: 18, angle: 0, depth: 0 },
+  { id: "y", label: "Y", x: 0, y: -18, length: 18, angle: -90, depth: 0 },
+  { id: "z", label: "Z", x: -13, y: 11, length: 17, angle: 140, depth: 0 },
+];
+
 function createRenderer(container: HTMLDivElement) {
   const renderer = new THREE.WebGLRenderer({
     antialias: true,
@@ -74,6 +90,8 @@ export function Viewport3D() {
   const [viewportLabels, setViewportLabels] = useState<
     Array<{ id: string; label: string; x: number; y: number; active: boolean }>
   >([]);
+  const [orientationAxes, setOrientationAxes] = useState(defaultOrientationAxes);
+  const orientationAxesRef = useRef(defaultOrientationAxes);
   const cameraPreviewActive = useProjectStore((state) => state.cameraPreviewActive);
   const outputFrame = useProjectStore((state) => state.outputFrame);
 
@@ -117,6 +135,18 @@ export function Viewport3D() {
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
     const projectedSelectionPoint = new THREE.Vector3();
+    const orientationCameraSpace = new THREE.Vector3();
+    const orientationCameraQuaternion = new THREE.Quaternion();
+    const orientationAxisRadius = 19;
+    const orientationAxisDefinitions: Array<{
+      id: OrientationAxis["id"];
+      label: OrientationAxis["label"];
+      direction: THREE.Vector3;
+    }> = [
+      { id: "x", label: "X", direction: new THREE.Vector3(1, 0, 0) },
+      { id: "y", label: "Y", direction: new THREE.Vector3(0, 1, 0) },
+      { id: "z", label: "Z", direction: new THREE.Vector3(0, 0, 1) },
+    ];
     const cameraRigs = new Map<string, THREE.Object3D>();
     const objectBoundsHelpers = new Map<string, THREE.BoxHelper>();
     let activeCameraAimId: string | undefined;
@@ -149,6 +179,40 @@ export function Viewport3D() {
       previewCamera.updateProjectionMatrix();
       const width = 320;
       previewRenderer.setSize(width, Math.max(120, Math.round(width / ratio)), false);
+    };
+
+    const updateOrientationWidget = () => {
+      orientationCameraQuaternion.copy(camera.quaternion).invert();
+      const nextAxes = orientationAxisDefinitions.map(({ id, label, direction }) => {
+        orientationCameraSpace.copy(direction).applyQuaternion(orientationCameraQuaternion);
+        const x = orientationCameraSpace.x * orientationAxisRadius;
+        const y = -orientationCameraSpace.y * orientationAxisRadius;
+        return {
+          id,
+          label,
+          x: Math.round(x * 10) / 10,
+          y: Math.round(y * 10) / 10,
+          length: Math.round(Math.hypot(x, y) * 10) / 10,
+          angle: Math.round((Math.atan2(y, x) * 180) / Math.PI),
+          depth: Math.round(orientationCameraSpace.z * 1000) / 1000,
+        };
+      });
+      const previousAxes = orientationAxesRef.current;
+      const changed = nextAxes.some((axis, index) => {
+        const previous = previousAxes[index];
+        return (
+          !previous ||
+          Math.abs(axis.x - previous.x) > 0.2 ||
+          Math.abs(axis.y - previous.y) > 0.2 ||
+          Math.abs(axis.length - previous.length) > 0.2 ||
+          Math.abs(axis.angle - previous.angle) > 0.5 ||
+          Math.abs(axis.depth - previous.depth) > 0.01
+        );
+      });
+      if (changed) {
+        orientationAxesRef.current = nextAxes;
+        setOrientationAxes(nextAxes);
+      }
     };
 
     const transformControls = new TransformControls(camera, renderer.domElement);
@@ -1434,6 +1498,7 @@ export function Viewport3D() {
       } else {
         renderer.render(scene, camera);
       }
+      updateOrientationWidget();
 
       const inspectedCamera =
         storeRef.current.animation.isPlaying
@@ -1529,9 +1594,26 @@ export function Viewport3D() {
     <div className="viewport-stage" ref={containerRef}>
       <div className="viewport-hud">
         <div className="orientation-widget">
-          <i className="axis-dot red" />
-          <i className="axis-dot green" />
-          <i className="axis-dot blue" />
+          <span className="orientation-origin" />
+          {orientationAxes.map((axis) => (
+            <span
+              className={`orientation-axis orientation-axis-${axis.id}`}
+              key={axis.id}
+              style={
+                {
+                  "--axis-x": `${axis.x}px`,
+                  "--axis-y": `${axis.y}px`,
+                  "--axis-length": `${axis.length}px`,
+                  "--axis-angle": `${axis.angle}deg`,
+                  "--axis-opacity": `${0.62 + (1 - axis.depth) * 0.16}`,
+                  zIndex: Math.round((1 - axis.depth) * 10),
+                } as CSSProperties
+              }
+            >
+              <span className="orientation-axis-line" />
+              <span className="orientation-axis-tip">{axis.label}</span>
+            </span>
+          ))}
         </div>
         {cameraPreviewActive ? (
           <span className="camera-view-badge">摄影机视角</span>

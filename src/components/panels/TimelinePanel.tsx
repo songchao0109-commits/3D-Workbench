@@ -4,6 +4,8 @@ import {
   ChevronRight,
   ChevronUp,
   Circle,
+  CornerDownLeft,
+  CornerDownRight,
   Download,
   KeyRound,
   Pause,
@@ -14,7 +16,12 @@ import {
   Trash2,
   Video,
 } from "lucide-react";
-import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
+import type {
+  CSSProperties,
+  FocusEvent as ReactFocusEvent,
+  MouseEvent as ReactMouseEvent,
+  PointerEvent as ReactPointerEvent,
+} from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { TimelineKeyframeRef } from "../../domain/projectTypes";
 import { formatBoneDisplayName } from "../../domain/rigUtils";
@@ -230,6 +237,11 @@ export function TimelinePanel({
   const [exportError, setExportError] = useState("");
   const [cameraMenuOpen, setCameraMenuOpen] = useState(false);
   const [lastEditedKeyframeIds, setLastEditedKeyframeIds] = useState<string[]>([]);
+  const [toolbarTooltip, setToolbarTooltip] = useState<{
+    label: string;
+    x: number;
+    y: number;
+  } | null>(null);
   const previousBindingsRef = useRef(animation.bindings);
   const cameraMenuRef = useRef<HTMLDivElement>(null);
   const timelineScrollRef = useRef<HTMLDivElement>(null);
@@ -1494,6 +1506,24 @@ export function TimelinePanel({
     });
   };
 
+  const showToolbarTooltip = (
+    event:
+      | ReactFocusEvent<HTMLButtonElement>
+      | ReactMouseEvent<HTMLButtonElement>,
+    label: string,
+  ) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    setToolbarTooltip({
+      label,
+      x: rect.left + rect.width / 2,
+      y: rect.bottom + 8,
+    });
+  };
+
+  const hideToolbarTooltip = () => {
+    setToolbarTooltip(null);
+  };
+
   return (
     <section
       className={`timeline-panel ${expanded ? "is-expanded" : "is-collapsed"}`}
@@ -1518,7 +1548,7 @@ export function TimelinePanel({
       <div className="timeline-dock-bar">
         <button className="timeline-toggle-button" type="button" onClick={onToggle}>
           <Video size={15} />
-          <span>关键帧时间线</span>
+          <span>关键帧动画</span>
           <ChevronUp className={expanded ? "is-expanded" : ""} size={15} />
         </button>
 
@@ -1557,34 +1587,56 @@ export function TimelinePanel({
       {expanded ? (
         <div className="timeline-panel-body">
           <div className="timeline-editor-toolbar">
-            <div className="timeline-toolbar-left">
-              <button className="timeline-editor-title" type="button" onClick={onToggle}>
-                <Video size={15} />
-                <strong>关键帧动画</strong>
-                <ChevronDown size={15} />
-              </button>
-              <label className="timeline-fps-field">
-                <span>帧率:</span>
-                <select
-                  value={animation.fps}
-                  onChange={(event) => setAnimationFps(Number(event.target.value))}
-                >
-                  {[24, 25, 30].map((fps) => (
-                    <option key={fps} value={fps}>
-                      {fps}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-            <div className="timeline-toolbar-center">
+            <div className="timeline-toolbar-main">
+              <div className="timeline-toolbar-left">
+                <button className="timeline-editor-title" type="button" onClick={onToggle}>
+                  <Video size={15} />
+                  <strong>关键帧动画</strong>
+                  <ChevronDown size={15} />
+                </button>
+                <label className="timeline-fps-field">
+                  <span>帧率:</span>
+                  <select
+                    value={animation.fps}
+                    onChange={(event) => setAnimationFps(Number(event.target.value))}
+                  >
+                    {[24, 25, 30].map((fps) => (
+                      <option key={fps} value={fps}>
+                        {fps}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
               <div className="timeline-playback-group">
-                <button type="button" onClick={() => moveToAdjacentKeyframe(-1)}>
+                <button
+                  aria-label="上一关键帧"
+                  className="timeline-icon-button"
+                  data-tooltip="上一关键帧"
+                  title="上一关键帧"
+                  type="button"
+                  onBlur={hideToolbarTooltip}
+                  onClick={() => moveToAdjacentKeyframe(-1)}
+                  onFocus={(event) => showToolbarTooltip(event, "上一关键帧")}
+                  onMouseEnter={(event) => showToolbarTooltip(event, "上一关键帧")}
+                  onMouseLeave={hideToolbarTooltip}
+                >
                   <SkipBack size={14} />
-                  <span>上一关键帧</span>
                 </button>
                 <button
+                  aria-label={animation.isPlaying ? "暂停" : "播放"}
+                  className="timeline-icon-button"
+                  data-tooltip={animation.isPlaying ? "暂停" : "播放"}
+                  title={animation.isPlaying ? "暂停" : "播放"}
                   type="button"
+                  onBlur={hideToolbarTooltip}
+                  onFocus={(event) =>
+                    showToolbarTooltip(event, animation.isPlaying ? "暂停" : "播放")
+                  }
+                  onMouseEnter={(event) =>
+                    showToolbarTooltip(event, animation.isPlaying ? "暂停" : "播放")
+                  }
+                  onMouseLeave={hideToolbarTooltip}
                   onPointerDown={(event) => {
                     event.preventDefault();
                     event.stopPropagation();
@@ -1592,53 +1644,125 @@ export function TimelinePanel({
                   }}
                 >
                   {animation.isPlaying ? <Pause size={14} /> : <Play size={14} />}
-                  <span>{animation.isPlaying ? "暂停" : "播放"}</span>
                 </button>
-                <button type="button" onClick={() => moveToAdjacentKeyframe(1)}>
+                <button
+                  aria-label="下一关键帧"
+                  className="timeline-icon-button"
+                  data-tooltip="下一关键帧"
+                  title="下一关键帧"
+                  type="button"
+                  onBlur={hideToolbarTooltip}
+                  onClick={() => moveToAdjacentKeyframe(1)}
+                  onFocus={(event) => showToolbarTooltip(event, "下一关键帧")}
+                  onMouseEnter={(event) => showToolbarTooltip(event, "下一关键帧")}
+                  onMouseLeave={hideToolbarTooltip}
+                >
                   <SkipForward size={14} />
-                  <span>下一关键帧</span>
+                </button>
+              </div>
+              <div className="timeline-toolbar-actions">
+                <button
+                  aria-label="设置入点"
+                  className="timeline-icon-button"
+                  data-tooltip="设置入点"
+                  title="设置入点"
+                  type="button"
+                  onBlur={hideToolbarTooltip}
+                  onClick={handleSetInPoint}
+                  onFocus={(event) => showToolbarTooltip(event, "设置入点")}
+                  onMouseEnter={(event) => showToolbarTooltip(event, "设置入点")}
+                  onMouseLeave={hideToolbarTooltip}
+                >
+                  <CornerDownRight size={14} />
+                </button>
+                <button
+                  aria-label="设置出点"
+                  className="timeline-icon-button"
+                  data-tooltip="设置出点"
+                  title="设置出点"
+                  type="button"
+                  onBlur={hideToolbarTooltip}
+                  onClick={handleSetOutPoint}
+                  onFocus={(event) => showToolbarTooltip(event, "设置出点")}
+                  onMouseEnter={(event) => showToolbarTooltip(event, "设置出点")}
+                  onMouseLeave={hideToolbarTooltip}
+                >
+                  <CornerDownLeft size={14} />
+                </button>
+                <button
+                  aria-label="自动关键帧"
+                  className={`timeline-icon-button timeline-auto-key-button ${
+                    animation.autoKeyEnabled ? "is-active" : ""
+                  }`}
+                  data-tooltip="自动关键帧"
+                  title="自动关键帧"
+                  type="button"
+                  onBlur={hideToolbarTooltip}
+                  onClick={() => setAnimationAutoKeyEnabled(!animation.autoKeyEnabled)}
+                  onFocus={(event) => showToolbarTooltip(event, "自动关键帧")}
+                  onMouseEnter={(event) => showToolbarTooltip(event, "自动关键帧")}
+                  onMouseLeave={hideToolbarTooltip}
+                >
+                  <Circle size={10} />
+                </button>
+                <button
+                  aria-label="手动插帧"
+                  className="timeline-icon-button timeline-primary-button"
+                  data-tooltip="手动插帧"
+                  title="手动插帧"
+                  type="button"
+                  onBlur={hideToolbarTooltip}
+                  onClick={handleCapture}
+                  onFocus={(event) => showToolbarTooltip(event, "手动插帧")}
+                  onMouseEnter={(event) => showToolbarTooltip(event, "手动插帧")}
+                  onMouseLeave={hideToolbarTooltip}
+                >
+                  <KeyRound size={14} />
+                </button>
+                <button
+                  aria-label="删除关键帧"
+                  className="timeline-icon-button"
+                  data-tooltip="删除关键帧"
+                  title="删除关键帧"
+                  disabled={!selectedKeyframe}
+                  type="button"
+                  onBlur={hideToolbarTooltip}
+                  onClick={handleDeleteSelectedKeyframe}
+                  onFocus={(event) => showToolbarTooltip(event, "删除关键帧")}
+                  onMouseEnter={(event) => showToolbarTooltip(event, "删除关键帧")}
+                  onMouseLeave={hideToolbarTooltip}
+                >
+                  <Trash2 size={14} />
+                </button>
+                <button
+                  aria-label="导出视频"
+                  className="timeline-icon-button"
+                  data-tooltip="导出视频"
+                  title="导出视频"
+                  type="button"
+                  onBlur={hideToolbarTooltip}
+                  onClick={openExportDialog}
+                  onFocus={(event) => showToolbarTooltip(event, "导出视频")}
+                  onMouseEnter={(event) => showToolbarTooltip(event, "导出视频")}
+                  onMouseLeave={hideToolbarTooltip}
+                >
+                  <Download size={14} />
                 </button>
               </div>
             </div>
-            <div className="timeline-toolbar-actions">
-              <button className="timeline-ghost-button" type="button" onClick={handleSetInPoint}>
-                <span>入点 I</span>
-              </button>
-              <button className="timeline-ghost-button" type="button" onClick={handleSetOutPoint}>
-                <span>出点 O</span>
-              </button>
-              <button
-                className={`timeline-auto-key-button ${
-                  animation.autoKeyEnabled ? "is-active" : ""
-                }`}
-                type="button"
-                onClick={() => setAnimationAutoKeyEnabled(!animation.autoKeyEnabled)}
+            {toolbarTooltip ? (
+              <div
+                className="timeline-floating-tooltip"
+                style={
+                  {
+                    "--tooltip-x": `${toolbarTooltip.x}px`,
+                    "--tooltip-y": `${toolbarTooltip.y}px`,
+                  } as CSSProperties
+                }
               >
-                <Circle size={10} />
-                <span>自动关键帧</span>
-              </button>
-              <button className="timeline-primary-button" type="button" onClick={handleCapture}>
-                <KeyRound size={14} />
-                <span>手动插帧</span>
-              </button>
-              <button
-                className="timeline-ghost-button"
-                disabled={!selectedKeyframe}
-                type="button"
-                onClick={handleDeleteSelectedKeyframe}
-              >
-                <Trash2 size={14} />
-                <span>删除</span>
-              </button>
-              <button
-                className="timeline-ghost-button"
-                type="button"
-                onClick={openExportDialog}
-              >
-                <Download size={14} />
-                <span>导出视频</span>
-              </button>
-            </div>
+                {toolbarTooltip.label}
+              </div>
+            ) : null}
           </div>
 
           {exportDialogOpen ? (

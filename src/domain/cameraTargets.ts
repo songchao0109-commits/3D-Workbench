@@ -17,6 +17,14 @@ function resolveObjectTargetCenter(objectId: string, fallback: Vec3): Vec3 {
   return [center.x, center.y, center.z];
 }
 
+function addTargetOffset(target: Vec3, offset: Vec3 = [0, 0, 0]): Vec3 {
+  return [
+    target[0] + offset[0],
+    target[1] + offset[1],
+    target[2] + offset[2],
+  ];
+}
+
 export function resolveCameraTarget(
   camera: SceneCamera,
   objects: SceneObject[],
@@ -28,13 +36,14 @@ export function resolveCameraTarget(
 
   if (camera.targetRefType === "object") {
     const object = objects.find((item) => item.id === camera.targetRefId);
-    return object
+    const target = object
       ? resolveObjectTargetCenter(camera.targetRefId, object.position)
       : camera.target;
+    return addTargetOffset(target, camera.targetOffset);
   }
 
   const targetCamera = cameras.find(
     (item) => item.id === camera.targetRefId && item.id !== camera.id,
   );
-  return targetCamera?.position ?? camera.target;
+  return addTargetOffset(targetCamera?.position ?? camera.target, camera.targetOffset);
 }

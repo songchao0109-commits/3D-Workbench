@@ -4,8 +4,6 @@ import {
   Eye,
   EyeOff,
   Lock,
-  Move3D,
-  Rotate3D,
   Search,
   Trash2,
   Unlock,
@@ -28,19 +26,17 @@ import { useProjectStore } from "../../store/projectStore";
 import { getLookAtRotation } from "../../three/cameraRig";
 import { TransformFields } from "./TransformFields";
 
-const transformModeLabels: Array<{
-  icon: typeof Move3D;
-  id: Extract<TransformMode, "translate" | "rotate">;
-  label: string;
-}> = [
-  { id: "translate", label: "移动", icon: Move3D },
-  { id: "rotate", label: "旋转", icon: Rotate3D },
+const cameraModeLabels: Array<{ id: CameraMode; label: string }> = [
+  { id: "lookAt", label: "注视目标" },
+  { id: "free", label: "自由朝向" },
 ];
 
-const cameraModeLabels: Array<{ id: CameraMode; label: string }> = [
-  { id: "free", label: "自由朝向" },
-  { id: "lookAt", label: "注视目标" },
-];
+const minFocalLength = 18;
+const maxFocalLength = 135;
+const referenceFov = 45;
+const referenceFocalLength = 35;
+const virtualSensorSize =
+  2 * referenceFocalLength * Math.tan((referenceFov * Math.PI) / 360);
 
 function toDegreesVector(value: Vec3): Vec3 {
   return value.map((item) => (item * 180) / Math.PI) as Vec3;
@@ -52,6 +48,21 @@ function toRadiansVector(value: Vec3): Vec3 {
 
 function clampFov(value: number) {
   return Math.min(90, Math.max(18, Math.round(value)));
+}
+
+function clampFocalLength(value: number) {
+  return Math.min(maxFocalLength, Math.max(minFocalLength, Math.round(value)));
+}
+
+function fovToFocalLength(fov: number) {
+  return clampFocalLength(virtualSensorSize / (2 * Math.tan((fov * Math.PI) / 360)));
+}
+
+function focalLengthToFov(focalLength: number) {
+  const nextFov =
+    (Math.atan(virtualSensorSize / (2 * clampFocalLength(focalLength))) * 360) /
+    Math.PI;
+  return clampFov(nextFov);
 }
 
 function getCameraLookAtRotation(camera: SceneCamera, target = camera.target): Vec3 {
@@ -236,6 +247,10 @@ export function CameraInspector() {
   }
 
   const disabled = camera.locked;
+  const targetOffsetEditable = Boolean(selectedTargetCandidate);
+  const targetOffsetValue = targetOffsetEditable
+    ? camera.targetOffset ?? ([0, 0, 0] as Vec3)
+    : ([0, 0, 0] as Vec3);
 
   const handleTargetModeChange = (mode: CameraTargetMode) => {
     updateCamera(camera.id, {
@@ -246,9 +261,20 @@ export function CameraInspector() {
     });
   };
 
-  const handleFovChange = (value: number) => {
-    updateCamera(camera.id, { fov: clampFov(value) });
+  const handleFocalLengthChange = (value: number) => {
+    updateCamera(camera.id, { fov: focalLengthToFov(value) });
   };
+
+  const handleCameraModeChange = (mode: CameraMode) => {
+    updateCamera(camera.id, {
+      mode,
+      rotation:
+        mode === "free" ? getCameraLookAtRotation(camera, resolvedTarget) : camera.rotation,
+    });
+    setTransformMode(mode === "free" ? "rotate" : "translate");
+  };
+
+  const focalLength = fovToFocalLength(camera.fov);
 
   return (
     <section className="panel-block camera-panel">
@@ -325,210 +351,168 @@ export function CameraInspector() {
         />
       </div>
 
-      <div className="field-group">
-        <label>镜头朝向</label>
-        <div className="segmented-control two-columns">
-          {cameraModeLabels.map((mode) => (
-            <button
-              className={camera.mode === mode.id ? "is-active" : ""}
-              disabled={disabled}
-              key={mode.id}
-              type="button"
-              onClick={() =>
-                updateCamera(camera.id, {
-                  mode: mode.id,
-                  rotation:
-                    mode.id === "free"
-                      ? getCameraLookAtRotation(camera, resolvedTarget)
-                      : camera.rotation,
-                })
-              }
-            >
-              <span>{mode.label}</span>
-            </button>
-          ))}
-        </div>
-        <div className="small-meta">
-          {camera.mode === "lookAt"
-            ? "注视目标模式下，镜头朝向由目标驱动；通过移动机位或调整注视目标改变画面。"
-            : "自由朝向模式下，可直接旋转摄影机决定镜头方向。"}
-        </div>
-      </div>
-
-      <div className="field-group">
-        <label>视口拖拽模式</label>
-        <div
-          className={`segmented-control ${
-            camera.mode === "lookAt" ? "single-option-control" : ""
-          }`}
-        >
-          {transformModeLabels
-            .filter((mode) => (camera.mode === "lookAt" ? mode.id === "translate" : true))
-            .map((mode) => {
-              const Icon = mode.icon;
-              const modeDisabled = disabled || !camera.visible;
-              return (
-                <button
-                  className={effectiveTransformMode === mode.id ? "is-active" : ""}
-                  disabled={modeDisabled}
-                  key={mode.id}
-                  type="button"
-                  onClick={() => setTransformMode(mode.id)}
-                >
-                  <Icon size={15} />
-                  <span>{mode.label}</span>
-                </button>
-              );
-            })}
-        </div>
-      </div>
-
       <TransformFields
         disabled={disabled}
         label="位置"
         value={camera.position}
         onChange={(position) => updateCamera(camera.id, { position })}
       />
-      <TransformFields
-        disabled={disabled || camera.mode === "lookAt"}
-        label="旋转"
-        step={1}
-        value={toDegreesVector(camera.rotation)}
-        onChange={(rotation) =>
-          updateCamera(camera.id, { rotation: toRadiansVector(rotation) })
-        }
-      />
 
       <div className="field-group">
-        <label>注视目标来源</label>
-        <div className="segmented-control two-columns">
-          <button
-            className={camera.targetMode === "asset" ? "is-active" : ""}
-            disabled={disabled || camera.mode !== "lookAt"}
-            type="button"
-            onClick={() => handleTargetModeChange("asset")}
-          >
-            <span>资产列表</span>
-          </button>
-          <button
-            className={camera.targetMode === "manual" ? "is-active" : ""}
-            disabled={disabled || camera.mode !== "lookAt"}
-            type="button"
-            onClick={() => handleTargetModeChange("manual")}
-          >
-            <span>手动坐标</span>
-          </button>
+        <label>机位焦段</label>
+        <div className="fov-row camera-lens-row">
+          <input
+            aria-label="机位焦段"
+            disabled={disabled}
+            min={minFocalLength}
+            max={maxFocalLength}
+            step="1"
+            type="range"
+            value={focalLength}
+            onChange={(event) => handleFocalLengthChange(event.currentTarget.valueAsNumber)}
+            onInput={(event) => handleFocalLengthChange(event.currentTarget.valueAsNumber)}
+          />
+          <output>{focalLength}mm</output>
         </div>
       </div>
 
-      {camera.mode === "lookAt" && camera.targetMode === "asset" ? (
-        <div className="suggest-field">
-          <label className="search-box compact-search suggest-input">
-            <Search size={15} />
-            <input
-              ref={targetInputRef}
-              placeholder="搜索对象"
-              value={targetSearch}
-              onBlur={() => {
-                window.setTimeout(() => {
-                  setTargetSuggestOpen(false);
-                  setTargetSearch(selectedTargetCandidate?.label ?? "");
-                }, 120);
-              }}
-              onChange={(event) => {
-                setTargetSearch(event.target.value);
-                setTargetSuggestOpen(true);
-              }}
-              onFocus={() => setTargetSuggestOpen(true)}
-            />
-          </label>
-          {targetSuggestOpen ? (
-            <div className="camera-target-list suggest-dropdown">
-              {targetCandidates.length ? (
-                targetCandidates.map((item) => (
-                  <button
-                    className={`camera-target-item ${
-                      camera.targetRefId === item.id && camera.targetRefType === item.type
-                        ? "is-active"
-                        : ""
-                    }`}
-                    key={`${item.type}-${item.id}`}
-                    type="button"
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={() => {
-                      updateCamera(camera.id, {
-                        targetMode: "asset",
-                        targetRefId: item.id,
-                        targetRefType: item.type,
-                      });
-                      setTargetSearch(item.label);
-                      setTargetSuggestOpen(false);
-                      targetInputRef.current?.blur();
-                    }}
-                  >
-                    <span>{item.label}</span>
-                    <span>{item.subtitle}</span>
-                  </button>
-                ))
-              ) : (
-                <div className="suggest-empty">未找到匹配对象</div>
-              )}
-            </div>
-          ) : null}
-          <div className="small-meta">
-            支持搜索项目内对象与机位，单选后即作为当前注视目标
+      <div className="field-group">
+        <label>镜头朝向</label>
+        <div className="segmented-control two-columns camera-mode-toggle">
+          {cameraModeLabels.map((mode) => (
+            <button
+              className={camera.mode === mode.id ? "is-active" : ""}
+              disabled={disabled}
+              key={mode.id}
+              type="button"
+              onClick={() => handleCameraModeChange(mode.id)}
+            >
+              <span>{mode.label}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {camera.mode === "free" ? (
+        <TransformFields
+          disabled={disabled}
+          label="旋转"
+          step={1}
+          value={toDegreesVector(camera.rotation)}
+          onChange={(rotation) =>
+            updateCamera(camera.id, { rotation: toRadiansVector(rotation) })
+          }
+        />
+      ) : null}
+
+      {camera.mode === "lookAt" ? (
+        <div className="field-group">
+          <label>注视目标来源</label>
+          <div className="segmented-control two-columns">
+            <button
+              className={camera.targetMode === "asset" ? "is-active" : ""}
+              disabled={disabled}
+              type="button"
+              onClick={() => handleTargetModeChange("asset")}
+            >
+              <span>资产列表</span>
+            </button>
+            <button
+              className={camera.targetMode === "manual" ? "is-active" : ""}
+              disabled={disabled}
+              type="button"
+              onClick={() => handleTargetModeChange("manual")}
+            >
+              <span>手动坐标</span>
+            </button>
           </div>
         </div>
       ) : null}
 
-      <TransformFields
-        disabled={disabled || camera.mode !== "lookAt" || camera.targetMode !== "manual"}
-        label="注视坐标"
-        value={resolvedTarget}
-        onChange={(target) =>
-          updateCamera(camera.id, {
-            target,
-            targetMode: "manual",
-            targetRefId: undefined,
-            targetRefType: undefined,
-            rotation: getCameraLookAtRotation(camera, target),
-          })
-        }
-      />
-
-      <div className="field-group">
-        <label>视野角度 FOV</label>
-        <div className="fov-row">
-          <input
-            aria-label="视野角度 FOV"
-            disabled={disabled}
-            min="18"
-            max="90"
-            step="1"
-            type="range"
-            value={camera.fov}
-            onChange={(event) => handleFovChange(event.currentTarget.valueAsNumber)}
-            onInput={(event) => handleFovChange(event.currentTarget.valueAsNumber)}
-          />
-          <div className="fov-value-field">
-            <input
-              aria-label="FOV 数值"
-              className="text-field"
-              disabled={disabled}
-              inputMode="numeric"
-              max="90"
-              min="18"
-              type="number"
-              value={camera.fov}
-              onBlur={(event) =>
-                handleFovChange(Number(event.currentTarget.value || camera.fov))
-              }
-              onChange={(event) => handleFovChange(Number(event.currentTarget.value))}
-            />
-            <span>°</span>
+      {camera.mode === "lookAt" && camera.targetMode === "asset" ? (
+        <>
+          <div className="suggest-field">
+            <label className="search-box compact-search suggest-input">
+              <Search size={15} />
+              <input
+                ref={targetInputRef}
+                placeholder="搜索对象"
+                value={targetSearch}
+                onBlur={() => {
+                  window.setTimeout(() => {
+                    setTargetSuggestOpen(false);
+                    setTargetSearch(selectedTargetCandidate?.label ?? "");
+                  }, 120);
+                }}
+                onChange={(event) => {
+                  setTargetSearch(event.target.value);
+                  setTargetSuggestOpen(true);
+                }}
+                onFocus={() => setTargetSuggestOpen(true)}
+              />
+            </label>
+            {targetSuggestOpen ? (
+              <div className="camera-target-list suggest-dropdown">
+                {targetCandidates.length ? (
+                  targetCandidates.map((item) => (
+                    <button
+                      className={`camera-target-item ${
+                        camera.targetRefId === item.id && camera.targetRefType === item.type
+                          ? "is-active"
+                          : ""
+                      }`}
+                      key={`${item.type}-${item.id}`}
+                      type="button"
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => {
+                        updateCamera(camera.id, {
+                          targetMode: "asset",
+                          targetRefId: item.id,
+                          targetRefType: item.type,
+                        });
+                        setTargetSearch(item.label);
+                        setTargetSuggestOpen(false);
+                        targetInputRef.current?.blur();
+                      }}
+                    >
+                      <span>{item.label}</span>
+                      <span>{item.subtitle}</span>
+                    </button>
+                  ))
+                ) : (
+                  <div className="suggest-empty">未找到匹配对象</div>
+                )}
+              </div>
+            ) : null}
+            <div className="small-meta">
+              支持搜索项目内对象与机位，单选后即作为当前注视目标
+            </div>
           </div>
-        </div>
-      </div>
+          <TransformFields
+            disabled={disabled || !targetOffsetEditable}
+            label="注视偏移"
+            value={targetOffsetValue}
+            onChange={(targetOffset) => updateCamera(camera.id, { targetOffset })}
+          />
+        </>
+      ) : null}
+
+      {camera.mode === "lookAt" && camera.targetMode === "manual" ? (
+        <TransformFields
+          disabled={disabled}
+          label="注视坐标"
+          value={resolvedTarget}
+          onChange={(target) =>
+            updateCamera(camera.id, {
+              target,
+              targetMode: "manual",
+              targetRefId: undefined,
+              targetRefType: undefined,
+              rotation: getCameraLookAtRotation(camera, target),
+            })
+          }
+        />
+      ) : null}
     </section>
   );
 }

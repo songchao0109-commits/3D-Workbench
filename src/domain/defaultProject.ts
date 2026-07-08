@@ -56,6 +56,7 @@ export const defaultProject: ProjectState = {
       position: [10.68, 7, 3.74],
       rotation: [-0.73, 1.09, 0.65],
       target: [0, 0, 0],
+      targetOffset: [0, 0, 0],
       targetMode: "manual",
       fov: 45,
       mode: "lookAt",

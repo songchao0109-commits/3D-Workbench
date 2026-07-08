@@ -353,6 +353,9 @@ export function applyAnimationToProjectState(
       if (channel.path === "target" && isVec3Value(sampledValue)) {
         camera.target = sampledValue;
       }
+      if (channel.path === "targetOffset" && isVec3Value(sampledValue)) {
+        camera.targetOffset = sampledValue;
+      }
       if (channel.path === "fov" && typeof sampledValue === "number") {
         camera.fov = sampledValue;
       }
@@ -763,7 +766,10 @@ export function recordObjectTransformChannels(
 
 export function recordCameraChannels(
   bindings: AnimationBinding[],
-  camera: Pick<SceneCamera, "id" | "name" | "position" | "rotation" | "target" | "fov">,
+  camera: Pick<
+    SceneCamera,
+    "id" | "name" | "position" | "rotation" | "target" | "targetOffset" | "fov"
+  >,
   time: number,
   mode: AnimationAutoKeyMode = "add_replace",
 ) {
@@ -816,6 +822,22 @@ export function recordCameraChannels(
       id: `keyframe_${crypto.randomUUID()}`,
       time,
       value: [...camera.target] as Vec3,
+      interpolation: "linear",
+    },
+    mode,
+  );
+  channels = upsertAnimationChannel(
+    channels,
+    {
+      id: getAnimationChannelId("targetOffset"),
+      label: "注视偏移",
+      path: "targetOffset",
+      valueType: "vec3",
+    },
+    {
+      id: `keyframe_${crypto.randomUUID()}`,
+      time,
+      value: [...(camera.targetOffset ?? [0, 0, 0])] as Vec3,
       interpolation: "linear",
     },
     mode,

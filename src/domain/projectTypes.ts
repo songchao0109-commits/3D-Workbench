@@ -20,6 +20,7 @@ export type AnimationChannelPath =
   | "rotation"
   | "scale"
   | "target"
+  | "targetOffset"
   | "fov"
   | "boneRotation"
   | "ikTargetPosition";
@@ -139,6 +140,7 @@ export type SceneCamera = {
   position: Vec3;
   rotation: Vec3;
   target: Vec3;
+  targetOffset?: Vec3;
   targetMode: CameraTargetMode;
   targetRefId?: string;
   targetRefType?: CameraTargetRefType;
