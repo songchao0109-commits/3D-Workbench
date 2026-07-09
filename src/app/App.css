@@ -470,6 +470,16 @@ h2 {
   background: #333;
 }
 
+.viewport-context-menu button:disabled {
+  color: #707070;
+  background: transparent;
+  cursor: not-allowed;
+}
+
+.viewport-context-menu button:disabled:hover {
+  background: transparent;
+}
+
 .viewport-context-menu .danger-action {
   color: #ffaaa5;
 }
@@ -2844,6 +2854,16 @@ h2 {
 
 .selection-action-grid button:hover {
   background: #343434;
+}
+
+.selection-action-grid button:disabled {
+  color: #787878;
+  background: #1b1b1b;
+  cursor: not-allowed;
+}
+
+.selection-action-grid button:disabled:hover {
+  background: #1b1b1b;
 }
 
 .selection-action-grid .danger-action {

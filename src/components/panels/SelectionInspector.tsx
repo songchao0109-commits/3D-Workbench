@@ -1,6 +1,7 @@
 import {
-  AlignHorizontalSpaceAround,
-  AlignVerticalSpaceAround,
+  AlignCenter,
+  ArrowDownToLine,
+  ArrowUpToLine,
   Copy,
   Eye,
   EyeOff,
@@ -16,6 +17,7 @@ import { useProjectStore } from "../../store/projectStore";
 
 export function SelectionInspector() {
   const objects = useProjectStore((state) => state.objects);
+  const groups = useProjectStore((state) => state.groups);
   const selectedObjectIds = useProjectStore((state) => state.selectedObjectIds);
   const copySelection = useProjectStore((state) => state.copySelection);
   const pasteClipboard = useProjectStore((state) => state.pasteClipboard);
@@ -25,13 +27,19 @@ export function SelectionInspector() {
   const groupSelection = useProjectStore((state) => state.groupSelection);
   const snapSelectionToGround = useProjectStore((state) => state.snapSelectionToGround);
   const alignSelection = useProjectStore((state) => state.alignSelection);
-  const distributeSelection = useProjectStore((state) => state.distributeSelection);
 
   const selectedObjects = objects.filter((object) =>
     selectedObjectIds.includes(object.id),
   );
   const hasHidden = selectedObjects.some((object) => !object.visible);
   const hasUnlocked = selectedObjects.some((object) => !object.locked);
+  const unlockedCount = selectedObjects.filter((object) => !object.locked).length;
+  const canGroup =
+    selectedObjects.length > 1 &&
+    selectedObjects.every(
+      (object) => !groups.some((group) => group.objectIds.includes(object.id)),
+    );
+  const canAlign = unlockedCount > 1;
 
   return (
     <section className="panel-block object-panel">
@@ -61,7 +69,7 @@ export function SelectionInspector() {
           <Copy size={15} />
           <span>复制一份</span>
         </button>
-        <button type="button" onClick={groupSelection}>
+        <button disabled={!canGroup} type="button" onClick={groupSelection}>
           <Group size={15} />
           <span>成组</span>
         </button>
@@ -69,17 +77,17 @@ export function SelectionInspector() {
           <MoveDown size={15} />
           <span>落地</span>
         </button>
-        <button type="button" onClick={() => alignSelection("x")}>
-          <AlignVerticalSpaceAround size={15} />
-          <span>X 对齐</span>
+        <button disabled={!canAlign} type="button" onClick={() => alignSelection("center")}>
+          <AlignCenter size={15} />
+          <span>中心点</span>
         </button>
-        <button type="button" onClick={() => alignSelection("z")}>
-          <AlignHorizontalSpaceAround size={15} />
-          <span>Z 对齐</span>
+        <button disabled={!canAlign} type="button" onClick={() => alignSelection("top")}>
+          <ArrowUpToLine size={15} />
+          <span>顶对齐</span>
         </button>
-        <button type="button" onClick={() => distributeSelection("x")}>
-          <AlignHorizontalSpaceAround size={15} />
-          <span>X 等距</span>
+        <button disabled={!canAlign} type="button" onClick={() => alignSelection("bottom")}>
+          <ArrowDownToLine size={15} />
+          <span>底对齐</span>
         </button>
         <button className="danger-action" type="button" onClick={removeSelection}>
           <Trash2 size={15} />

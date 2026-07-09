@@ -5,9 +5,18 @@ export type SerializedProject = ProjectState & {
   exportedAt: string;
 };
 
-export function sanitizeProjectForSave(project: ProjectState): SerializedProject {
+type SanitizeProjectOptions = {
+  includeSnapshots?: boolean;
+};
+
+export function sanitizeProjectForSave(
+  project: ProjectState,
+  options: SanitizeProjectOptions = {},
+): SerializedProject {
+  const { includeSnapshots = true } = options;
   return {
     ...project,
+    snapshots: includeSnapshots ? project.snapshots : [],
     cameraPreviewActive: false,
     importError: undefined,
     exportedAt: new Date().toISOString(),
@@ -34,6 +43,6 @@ export function parseProjectJson(value: string): ProjectState {
   };
 }
 
-export function serializeProject(project: ProjectState) {
-  return JSON.stringify(sanitizeProjectForSave(project), null, 2);
+export function serializeProject(project: ProjectState, options?: SanitizeProjectOptions) {
+  return JSON.stringify(sanitizeProjectForSave(project, options), null, 2);
 }

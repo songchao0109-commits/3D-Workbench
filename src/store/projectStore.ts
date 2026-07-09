@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { emitAppFeedback } from "../app/appFeedback";
 import { create } from "zustand";
 import {
   applyAnimationToProjectState,
@@ -23,6 +24,7 @@ import {
 } from "../domain/animationTimeline";
 import { defaultProject } from "../domain/defaultProject";
 import { getIkControlBones, isIkControlBoneName } from "../domain/rigUtils";
+import { sceneRegistry } from "../three/sceneRegistry";
 import type {
   AssetRecord,
   BoneRecord,
@@ -57,9 +59,12 @@ type ProjectHistoryState = {
 type ProjectStore = ProjectState & {
   clipboard?: ProjectClipboard;
   history: ProjectHistoryState;
+  historyDraft?: ProjectState;
   setActiveTool: (tool: ToolMode) => void;
   setTransformMode: (mode: TransformMode) => void;
   setOutputFrame: (frame: OutputFrame) => void;
+  beginHistoryDraft: () => void;
+  commitHistoryDraft: () => void;
   clearSelection: () => void;
   setActiveObject: (objectId?: string) => void;
   toggleObjectSelection: (objectId: string) => void;
@@ -117,7 +122,19 @@ type ProjectStore = ProjectState & {
   toggleGroupLocked: (groupId: string) => void;
   removeGroup: (groupId: string) => void;
   snapSelectionToGround: () => void;
-  alignSelection: (axis: "x" | "y" | "z") => void;
+  alignSelection: (
+    mode:
+      | "x"
+      | "y"
+      | "z"
+      | "left"
+      | "right"
+      | "bottom"
+      | "top"
+      | "front"
+      | "back"
+      | "center",
+  ) => void;
   distributeSelection: (axis: "x" | "z") => void;
   undo: () => void;
   redo: () => void;
@@ -455,6 +472,16 @@ function withHistory(
   state: ProjectStore,
   updates: Partial<ProjectStore>,
 ): Partial<ProjectStore> {
+  if (state.historyDraft) {
+    return {
+      ...updates,
+      history: {
+        ...state.history,
+        future: [],
+      },
+      historyDraft: state.historyDraft,
+    };
+  }
   return {
     ...updates,
     history: {
@@ -473,7 +500,12 @@ function restoreSnapshot(
     ...cloneProjectState(snapshot),
     history,
     clipboard: undefined,
+    historyDraft: undefined,
   };
+}
+
+function projectStatesEqual(left: ProjectState, right: ProjectState) {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function normalizeObjectIds(objectIds: string[], objects: SceneObject[]) {
@@ -533,6 +565,48 @@ function getObjectGroupId(groups: SceneGroup[], objectId: string) {
   return groups.find((group) => group.objectIds.includes(objectId))?.id;
 }
 
+function getRuntimeObjectBounds(objectId: string) {
+  const runtimeObject = sceneRegistry.getObject(objectId);
+  if (!runtimeObject) {
+    return undefined;
+  }
+
+  const box = new THREE.Box3();
+  const meshBounds = new THREE.Box3();
+  const parentInverseMatrix = new THREE.Matrix4()
+    .copy(runtimeObject.parent?.matrixWorld ?? new THREE.Matrix4())
+    .invert();
+  const meshMatrix = new THREE.Matrix4();
+  let hasBounds = false;
+
+  runtimeObject.traverse((child) => {
+    const mesh = child as THREE.Mesh;
+    if (!("geometry" in mesh) || !mesh.geometry) {
+      return;
+    }
+    if (!mesh.geometry.boundingBox) {
+      mesh.geometry.computeBoundingBox();
+    }
+    if (!mesh.geometry.boundingBox) {
+      return;
+    }
+    meshMatrix.multiplyMatrices(parentInverseMatrix, mesh.matrixWorld);
+    meshBounds.copy(mesh.geometry.boundingBox).applyMatrix4(meshMatrix);
+    if (!hasBounds) {
+      box.copy(meshBounds);
+      hasBounds = true;
+      return;
+    }
+    box.union(meshBounds);
+  });
+
+  return hasBounds ? box.clone() : undefined;
+}
+
+function getRuntimeObjectMinY(objectId: string) {
+  return getRuntimeObjectBounds(objectId)?.min.y;
+}
+
 function getReferencedAssetIds(state: ProjectState, objects = state.objects) {
   const ids = new Set<string>();
   objects.forEach((object) => {
@@ -575,9 +649,43 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     future: [],
     limit: historyLimit,
   },
+  historyDraft: undefined,
   setActiveTool: (tool) => set({ activeTool: tool }),
   setTransformMode: (mode) => set({ transformMode: mode, activeTool: "move" }),
   setOutputFrame: (frame) => set({ outputFrame: frame, activeTool: "aspect" }),
+  beginHistoryDraft: () =>
+    set((state) =>
+      state.historyDraft
+        ? state
+        : {
+            historyDraft: cloneProjectState(state),
+            history: {
+              ...state.history,
+              future: [],
+            },
+          },
+    ),
+  commitHistoryDraft: () =>
+    set((state) => {
+      if (!state.historyDraft) {
+        return state;
+      }
+      const draft = state.historyDraft;
+      const current = cloneProjectState(state);
+      if (projectStatesEqual(draft, current)) {
+        return {
+          historyDraft: undefined,
+        };
+      }
+      return {
+        historyDraft: undefined,
+        history: {
+          past: [...state.history.past, draft].slice(-state.history.limit),
+          future: [],
+          limit: state.history.limit,
+        },
+      };
+    }),
   clearSelection: () =>
     set({
       activeObjectId: undefined,
@@ -1229,12 +1337,20 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     }
     return get().pasteClipboard();
   },
-  removeSelection: () =>
+  removeSelection: () => {
+    const current = get();
+    const selectedIds = getSelectedObjectIds(current);
+    if (!selectedIds.length) {
+      emitAppFeedback("请先选择对象，再执行删除");
+      return;
+    }
+    if (
+      selectedIds.length >= 5 &&
+      !window.confirm(`即将删除 ${selectedIds.length} 个对象，是否继续？`)
+    ) {
+      return;
+    }
     set((state) => {
-      const selectedIds = getSelectedObjectIds(state);
-      if (!selectedIds.length) {
-        return state;
-      }
       const selectedSet = new Set(selectedIds);
       const removedAssetIds = new Set<string>();
       state.objects.forEach((object) => {
@@ -1270,7 +1386,8 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         activeObjectId: undefined,
         activeGroupId: undefined,
       });
-    }),
+    });
+  },
   setSelectionVisible: (visible) =>
     set((state) => {
       const selectedSet = new Set(getSelectedObjectIds(state));
@@ -1444,6 +1561,14 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     set((state) => {
       const selectedSet = new Set(getSelectedObjectIds(state));
       if (!selectedSet.size) {
+        emitAppFeedback("请先选择对象，再执行落地");
+        return state;
+      }
+      const movableObjects = state.objects.filter(
+        (object) => selectedSet.has(object.id) && !object.locked,
+      );
+      if (!movableObjects.length) {
+        emitAppFeedback("所选对象已锁定，无法执行落地");
         return state;
       }
       const groundY = state.worldSettings.ground.y;
@@ -1451,6 +1576,17 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         objects: state.objects.map((object) => {
           if (!selectedSet.has(object.id) || object.locked) {
             return object;
+          }
+          const minY = getRuntimeObjectMinY(object.id);
+          if (typeof minY === "number") {
+            return {
+              ...object,
+              position: [
+                object.position[0],
+                object.position[1] + (groundY - minY),
+                object.position[2],
+              ],
+            };
           }
           const height = object.actualDimensions?.[1] ?? 0;
           return {
@@ -1460,24 +1596,88 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         }),
       });
     }),
-  alignSelection: (axis) =>
+  alignSelection: (mode) =>
     set((state) => {
       const selectedSet = new Set(getSelectedObjectIds(state));
       const selectedObjects = state.objects.filter(
         (object) => selectedSet.has(object.id) && !object.locked,
       );
       if (selectedObjects.length < 2) {
+        emitAppFeedback("至少选择两个未锁定对象后才能对齐");
         return state;
       }
-      const axisIndex = axis === "x" ? 0 : axis === "y" ? 1 : 2;
-      const target = selectedObjects[0].position[axisIndex];
+      const boundsById = new Map(
+        selectedObjects.map((object) => [object.id, getRuntimeObjectBounds(object.id)]),
+      );
+      const getCenter = (object: SceneObject): Vec3 => {
+        const bounds = boundsById.get(object.id);
+        return bounds
+          ? [
+              (bounds.min.x + bounds.max.x) / 2,
+              (bounds.min.y + bounds.max.y) / 2,
+              (bounds.min.z + bounds.max.z) / 2,
+            ]
+          : object.position;
+      };
+      const getTargetValue = (object: SceneObject) => {
+        const bounds = boundsById.get(object.id);
+        switch (mode) {
+          case "left":
+            return bounds?.min.x ?? object.position[0];
+          case "right":
+            return bounds?.max.x ?? object.position[0];
+          case "bottom":
+            return bounds?.min.y ?? object.position[1];
+          case "top":
+            return bounds?.max.y ?? object.position[1];
+          case "front":
+            return bounds?.min.z ?? object.position[2];
+          case "back":
+            return bounds?.max.z ?? object.position[2];
+          case "y":
+            return bounds ? (bounds.min.y + bounds.max.y) / 2 : object.position[1];
+          case "z":
+            return bounds ? (bounds.min.z + bounds.max.z) / 2 : object.position[2];
+          case "x":
+          default:
+            return bounds ? (bounds.min.x + bounds.max.x) / 2 : object.position[0];
+        }
+      };
+      if (mode === "center") {
+        const targetCenter = getCenter(selectedObjects[0]);
+        return withHistory(state, {
+          objects: state.objects.map((object) =>
+            selectedSet.has(object.id) && !object.locked
+              ? {
+                  ...object,
+                  position: object.position.map((value, index) =>
+                    value + (targetCenter[index] - getCenter(object)[index]),
+                  ) as Vec3,
+                }
+              : object,
+          ),
+        });
+      }
+      const getAxisIndex = () => {
+        if (mode === "left" || mode === "right" || mode === "x") {
+          return 0;
+        }
+        if (mode === "bottom" || mode === "top" || mode === "y") {
+          return 1;
+        }
+        return 2;
+      };
+      const axisIndex = getAxisIndex();
+      const target = getTargetValue(selectedObjects[0]);
       return withHistory(state, {
         objects: state.objects.map((object) =>
           selectedSet.has(object.id) && !object.locked
             ? {
                 ...object,
                 position: object.position.map((value, index) =>
-                  index === axisIndex ? target : value,
+                  index === axisIndex
+                    ? value + (target - getTargetValue(object))
+                    : value,
                 ) as Vec3,
               }
             : object,
@@ -1492,6 +1692,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         .filter((object) => selectedSet.has(object.id) && !object.locked)
         .sort((left, right) => left.position[axisIndex] - right.position[axisIndex]);
       if (selectedObjects.length < 3) {
+        emitAppFeedback("至少选择三个未锁定对象后才能等距分布");
         return state;
       }
       const first = selectedObjects[0].position[axisIndex];
@@ -1515,7 +1716,11 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       });
     }),
   undo: () => {
-    const state = get();
+    let state = get();
+    if (state.historyDraft) {
+      state.commitHistoryDraft();
+      state = get();
+    }
     const previous = state.history.past.at(-1);
     if (!previous) {
       return;
@@ -1529,7 +1734,11 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     window.dispatchEvent(new CustomEvent("project-runtime-sync-request"));
   },
   redo: () => {
-    const state = get();
+    let state = get();
+    if (state.historyDraft) {
+      state.commitHistoryDraft();
+      state = get();
+    }
     const next = state.history.future[0];
     if (!next) {
       return;
@@ -1543,18 +1752,25 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     window.dispatchEvent(new CustomEvent("project-runtime-sync-request"));
   },
   replaceProject: (project) =>
-    set((state) =>
-      withHistory(state, {
-        ...cloneProjectState({
-          ...defaultProject,
-          ...project,
-          selectedObjectIds: normalizeObjectIds(project.selectedObjectIds ?? [], project.objects),
-          groups: project.groups ?? [],
-          cameraPreviewActive: false,
+    {
+      set((state) =>
+        withHistory(state, {
+          ...cloneProjectState({
+            ...defaultProject,
+            ...project,
+            selectedObjectIds: normalizeObjectIds(
+              project.selectedObjectIds ?? [],
+              project.objects,
+            ),
+            groups: project.groups ?? [],
+            cameraPreviewActive: false,
+          }),
+          clipboard: undefined,
+          historyDraft: undefined,
         }),
-        clipboard: undefined,
-      }),
-    ),
+      );
+      window.dispatchEvent(new CustomEvent("project-runtime-sync-request"));
+    },
   updateObjectMaterial: (objectId, materialId, updates) =>
     set((state) => {
       const textureAssetsToRemove = new Set<string>();
@@ -1690,21 +1906,29 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       return applyAnimationState(nextState, state.animation.currentTime);
     }),
   setAnimationInPoint: (time) =>
-    set((state) => ({
-      animation: setAnimationInPoint(state.animation, time),
-    })),
+    set((state) =>
+      withHistory(state, {
+        animation: setAnimationInPoint(state.animation, time),
+      }),
+    ),
   setAnimationOutPoint: (time) =>
-    set((state) => ({
-      animation: setAnimationOutPoint(state.animation, time),
-    })),
+    set((state) =>
+      withHistory(state, {
+        animation: setAnimationOutPoint(state.animation, time),
+      }),
+    ),
   clearAnimationInPoint: () =>
-    set((state) => ({
-      animation: clearAnimationInPoint(state.animation),
-    })),
+    set((state) =>
+      withHistory(state, {
+        animation: clearAnimationInPoint(state.animation),
+      }),
+    ),
   clearAnimationOutPoint: () =>
-    set((state) => ({
-      animation: clearAnimationOutPoint(state.animation),
-    })),
+    set((state) =>
+      withHistory(state, {
+        animation: clearAnimationOutPoint(state.animation),
+      }),
+    ),
   setAnimationInPointToCurrentTime: () =>
     set((state) => {
       const currentInPointTime =
@@ -1720,12 +1944,12 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         state.animation.duration,
         state.animation.fps,
       );
-      return {
+      return withHistory(state, {
         animation:
           currentInPointTime !== undefined && Math.abs(currentInPointTime - currentTime) < 0.0001
             ? clearAnimationInPoint(state.animation)
             : setAnimationInPoint(state.animation, currentTime),
-      };
+      });
     }),
   setAnimationOutPointToCurrentTime: () =>
     set((state) => {
@@ -1742,13 +1966,13 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         state.animation.duration,
         state.animation.fps,
       );
-      return {
+      return withHistory(state, {
         animation:
           currentOutPointTime !== undefined &&
           Math.abs(currentOutPointTime - currentTime) < 0.0001
             ? clearAnimationOutPoint(state.animation)
             : setAnimationOutPoint(state.animation, currentTime),
-      };
+      });
     }),
   stepAnimation: (deltaSeconds) =>
     set((state) => {
@@ -1781,55 +2005,72 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       };
     }),
   captureCurrentKeyframe: () => {
+    if (useProjectStore.getState().historyDraft) {
+      useProjectStore.getState().commitHistoryDraft();
+    }
     const state = useProjectStore.getState();
     const result = captureManualSelectionKeyframes(state);
     if (!result.ok) {
       return result;
     }
-    set((current) => ({
-      animation: {
-        ...current.animation,
-        bindings: result.bindings,
-      },
-    }));
+    set((current) =>
+      withHistory(current, {
+        animation: {
+          ...current.animation,
+          bindings: result.bindings,
+        },
+      }),
+    );
     return { ok: true as const };
   },
   addCurrentCameraCut: () => {
+    if (useProjectStore.getState().historyDraft) {
+      useProjectStore.getState().commitHistoryDraft();
+    }
     const state = useProjectStore.getState();
     const result = captureCameraCut(state);
     if (!result.ok) {
       return result;
     }
-    set((current) => ({
-      animation: {
-        ...current.animation,
-        cameraCuts: result.cameraCuts,
-      },
-    }));
+    set((current) =>
+      withHistory(current, {
+        animation: {
+          ...current.animation,
+          cameraCuts: result.cameraCuts,
+        },
+      }),
+    );
     return { ok: true as const };
   },
   addCameraCutAtTime: (cameraId) => {
+    if (useProjectStore.getState().historyDraft) {
+      useProjectStore.getState().commitHistoryDraft();
+    }
     const state = useProjectStore.getState();
     const result = captureCameraCutForCamera(state, cameraId);
     if (!result.ok) {
       return result;
     }
-    set((current) => ({
-      animation: {
-        ...current.animation,
-        cameraCuts: result.cameraCuts,
-      },
-    }));
+    set((current) =>
+      withHistory(current, {
+        animation: {
+          ...current.animation,
+          cameraCuts: result.cameraCuts,
+        },
+      }),
+    );
     return { ok: true as const };
   },
   removeSelectedTimelineKeyframe: (refs) =>
-    set((state) => ({
-      animation: {
-        ...state.animation,
-        bindings: removeTimelineKeyframes(state.animation.bindings, refs),
-        cameraCuts: removeCameraCuts(state.animation.cameraCuts, refs),
-      },
-    })),
+    set((state) =>
+      withHistory(state, {
+        animation: {
+          ...state.animation,
+          bindings: removeTimelineKeyframes(state.animation.bindings, refs),
+          cameraCuts: removeCameraCuts(state.animation.cameraCuts, refs),
+        },
+      }),
+    ),
   moveSelectedTimelineKeyframe: (refs, time) =>
     set((state) => {
       const nextTime = clampAnimationTime(
@@ -1849,16 +2090,19 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         state.animation.duration,
         state.animation.fps,
       );
-      return applyAnimationState(
-        {
-          ...state,
-          animation: {
-            ...state.animation,
-            bindings: nextBindings,
-            cameraCuts: nextCameraCuts,
+      return withHistory(
+        state,
+        applyAnimationState(
+          {
+            ...state,
+            animation: {
+              ...state.animation,
+              bindings: nextBindings,
+              cameraCuts: nextCameraCuts,
+            },
           },
-        },
-        state.animation.currentTime,
+          state.animation.currentTime,
+        ),
       );
     }),
   resizeCameraCutClip: (cutId, edge, time) =>
@@ -1871,12 +2115,12 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         state.animation.duration,
         state.animation.fps,
       );
-      return {
+      return withHistory(state, {
         animation: {
           ...state.animation,
           cameraCuts: nextCameraCuts,
         },
-      };
+      });
     }),
   setImportError: (message) => set({ importError: message }),
   releaseRuntimeAssets: () =>

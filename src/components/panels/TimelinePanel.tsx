@@ -204,6 +204,8 @@ export function TimelinePanel({
     (state) => state.moveSelectedTimelineKeyframe,
   );
   const resizeCameraCutClip = useProjectStore((state) => state.resizeCameraCutClip);
+  const beginHistoryDraft = useProjectStore((state) => state.beginHistoryDraft);
+  const commitHistoryDraft = useProjectStore((state) => state.commitHistoryDraft);
   const [feedback, setFeedback] = useState<string>("");
   const [expandedNodes, setExpandedNodes] = useState<Record<string, boolean>>({});
   const [selectedKeyframe, setSelectedKeyframe] = useState<{
@@ -560,6 +562,7 @@ export function TimelinePanel({
     if (!laneRect) {
       return;
     }
+    beginHistoryDraft();
     setDraggingRangePoint({
       type,
       laneLeft: laneRect.left,
@@ -711,6 +714,7 @@ export function TimelinePanel({
     };
 
     const handlePointerUp = () => {
+      commitHistoryDraft();
       setDraggingKeyframe(null);
     };
 
@@ -720,7 +724,12 @@ export function TimelinePanel({
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", handlePointerUp);
     };
-  }, [animation.duration, draggingKeyframe, moveSelectedTimelineKeyframe]);
+  }, [
+    animation.duration,
+    commitHistoryDraft,
+    draggingKeyframe,
+    moveSelectedTimelineKeyframe,
+  ]);
 
   useEffect(() => {
     if (!resizingCameraClip) {
@@ -742,6 +751,7 @@ export function TimelinePanel({
     };
 
     const handlePointerUp = () => {
+      commitHistoryDraft();
       setResizingCameraClip(null);
     };
 
@@ -751,7 +761,12 @@ export function TimelinePanel({
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", handlePointerUp);
     };
-  }, [animation.duration, resizingCameraClip, resizeCameraCutClip]);
+  }, [
+    animation.duration,
+    commitHistoryDraft,
+    resizingCameraClip,
+    resizeCameraCutClip,
+  ]);
 
   useEffect(() => {
     if (!draggingRangePoint) {
@@ -768,6 +783,7 @@ export function TimelinePanel({
     };
 
     const handlePointerUp = () => {
+      commitHistoryDraft();
       setDraggingRangePoint(null);
     };
 
@@ -777,7 +793,7 @@ export function TimelinePanel({
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", handlePointerUp);
     };
-  }, [draggingRangePoint, updateRangePointAtClientX]);
+  }, [commitHistoryDraft, draggingRangePoint, updateRangePointAtClientX]);
 
   const seekTimelineAtClientX = useCallback((
     clientX: number,
@@ -1173,6 +1189,7 @@ export function TimelinePanel({
     if (!laneRect) {
       return;
     }
+    beginHistoryDraft();
     setDraggingKeyframe({
       id: keyframe.id,
       refs: keyframe.refs,
@@ -1259,6 +1276,7 @@ export function TimelinePanel({
               if (!laneRect) {
                 return;
               }
+              beginHistoryDraft();
               setDraggingKeyframe({
                 id: clip.id,
                 refs: clip.refs,
@@ -1281,6 +1299,7 @@ export function TimelinePanel({
                     if (!laneRect) {
                       return;
                     }
+                    beginHistoryDraft();
                     setSelectedKeyframe({
                       id: clip.id,
                       refs: clip.refs,
@@ -1306,6 +1325,7 @@ export function TimelinePanel({
                     if (!laneRect) {
                       return;
                     }
+                    beginHistoryDraft();
                     setSelectedKeyframe({
                       id: clip.id,
                       refs: clip.refs,

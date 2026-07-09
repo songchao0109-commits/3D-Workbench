@@ -4,6 +4,21 @@ import type { BoneRecord, IkChainRecord, ObjectRig } from "../domain/projectType
 
 const loader = new GLTFLoader();
 
+export function loadGlbFromUrl(objectUrl: string) {
+  return new Promise<THREE.Group>((resolve, reject) => {
+    loader.load(
+      objectUrl,
+      (gltf) => {
+        resolve(gltf.scene);
+      },
+      undefined,
+      (error) => {
+        reject(error);
+      },
+    );
+  });
+}
+
 export function loadGlbFromFile(file: File) {
   const objectUrl = URL.createObjectURL(file);
 

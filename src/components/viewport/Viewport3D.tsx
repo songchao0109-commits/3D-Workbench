@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import * as THREE from "three";
+import { emitAppFeedback } from "../../app/appFeedback";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
 import { resolveCameraTarget } from "../../domain/cameraTargets";
@@ -30,6 +31,7 @@ import {
 import {
   extractRigFromScene,
   loadGlbFromFile,
+  loadGlbFromUrl,
   normalizeImportedScene,
 } from "../../three/glbLoader";
 import {
@@ -104,6 +106,41 @@ export function Viewport3D() {
   const orientationAxesRef = useRef(defaultOrientationAxes);
   const cameraPreviewActive = useProjectStore((state) => state.cameraPreviewActive);
   const outputFrame = useProjectStore((state) => state.outputFrame);
+  const hasSelection = useProjectStore((state) => {
+    const selectedIds = state.selectedObjectIds.length
+      ? state.selectedObjectIds
+      : state.activeObjectId
+        ? [state.activeObjectId]
+        : [];
+    return selectedIds.length > 0 || Boolean(state.activeGroupId);
+  });
+  const hasClipboard = useProjectStore((state) =>
+    Boolean(state.clipboard?.objects.length || state.clipboard?.groups.length),
+  );
+  const canGroup = useProjectStore((state) => {
+    const selectedIds = state.selectedObjectIds.length
+      ? state.selectedObjectIds
+      : state.activeObjectId
+        ? [state.activeObjectId]
+        : [];
+    return (
+      selectedIds.length > 1 &&
+      selectedIds.every(
+        (objectId) => !state.groups.some((group) => group.objectIds.includes(objectId)),
+      )
+    );
+  });
+  const canUngroup = useProjectStore((state) => {
+    const selectedIds = state.selectedObjectIds.length
+      ? state.selectedObjectIds
+      : state.activeObjectId
+        ? [state.activeObjectId]
+        : [];
+    const selectedGroups = state.groups.filter((group) =>
+      selectedIds.some((objectId) => group.objectIds.includes(objectId)),
+    );
+    return Boolean(state.activeGroupId) || selectedGroups.length > 0;
+  });
 
   useEffect(() => {
     const unsubscribe = useProjectStore.subscribe((state) => {
@@ -159,6 +196,7 @@ export function Viewport3D() {
     ];
     const cameraRigs = new Map<string, THREE.Object3D>();
     const objectBoundsHelpers = new Map<string, THREE.BoxHelper>();
+    const runtimeLoadWarnings = new Set<string>();
     let activeCameraAimId: string | undefined;
     let panoramaTexture: THREE.Texture | undefined;
     let loadedPanoramaAssetId: string | undefined;
@@ -233,9 +271,14 @@ export function Viewport3D() {
     scene.add(transformHelper);
     scene.add(selectionPivot);
     transformControls.addEventListener("dragging-changed", (event) => {
+      const store = useProjectStore.getState();
+      if (event.value) {
+        store.beginHistoryDraft();
+      }
       draggingRef.current = Boolean(event.value);
       controls.enabled = !event.value;
       if (!event.value) {
+        store.commitHistoryDraft();
         const state = useProjectStore.getState();
         state.objects.forEach(applyObjectState);
         syncObjectBounds();
@@ -440,12 +483,6 @@ export function Viewport3D() {
     keyLight.position.set(6, 10, 5);
     scene.add(ambient, keyLight);
 
-    const placeholder = createPlaceholderCharacter();
-    placeholder.position.set(0, 0, 0);
-    placeholder.userData.workbenchObjectId = "object_character_a";
-    worldRoot.add(placeholder);
-    sceneRegistry.registerObject("object_character_a", placeholder);
-
     const resize = () => {
       const width = container.clientWidth;
       const height = container.clientHeight;
@@ -528,18 +565,71 @@ export function Viewport3D() {
       });
     };
 
+    let disposed = false;
+
+    const createRuntimeObjectFromState = (objectState: SceneObject) => {
+      if (objectState.assetId) {
+        const asset = storeRef.current.assets.find((item) => item.id === objectState.assetId);
+        if (asset?.type === "glb" && asset.objectUrl) {
+          return loadGlbFromUrl(asset.objectUrl).then((scene) => {
+            normalizeImportedScene(scene);
+            return scene;
+          }).catch(() => {
+            if (!runtimeLoadWarnings.has(objectState.id)) {
+              runtimeLoadWarnings.add(objectState.id);
+              emitAppFeedback(`对象“${objectState.name}”的模型资源缺失，已用占位体代替`);
+            }
+            return createPlaceholderCharacter();
+          });
+        }
+      }
+
+      const template =
+        objectState.template ??
+        (objectState.type === "character"
+          ? {
+              kind: "standin" as const,
+              variant: objectState.name.includes("女性") ? "female" : "male",
+            }
+          : undefined);
+
+      if (template?.kind === "standin") {
+        return createStandinCharacter(template.variant);
+      }
+      if (template?.kind === "primitive") {
+        return createPrimitiveObject(template.variant);
+      }
+      return createPlaceholderCharacter();
+    };
+
     const cloneRuntimeObject = (objectState: SceneObject) => {
-      if (sceneRegistry.getObject(objectState.id)) {
+      const existing = sceneRegistry.getObject(objectState.id);
+      if (existing && existing.parent === worldRoot) {
         return;
+      }
+      if (existing && existing.parent !== worldRoot) {
+        sceneRegistry.unregisterObject(objectState.id);
       }
       const source = objectState.sourceObjectId
         ? sceneRegistry.getObject(objectState.sourceObjectId)
         : undefined;
-      const object = source ? source.clone(true) : createPlaceholderCharacter();
-      markRuntimeObject(object, objectState.id);
-      worldRoot.add(object);
-      sceneRegistry.registerObject(objectState.id, object);
-      applyObjectState(objectState);
+      const runtimeObject = source ? source.clone(true) : createRuntimeObjectFromState(objectState);
+      Promise.resolve(runtimeObject).then((object) => {
+        if (disposed) {
+          disposeObject3D(object);
+          return;
+        }
+        const current = sceneRegistry.getObject(objectState.id);
+        if (current && current.parent === worldRoot) {
+          disposeObject3D(object);
+          return;
+        }
+        markRuntimeObject(object, objectState.id);
+        worldRoot.add(object);
+        sceneRegistry.registerObject(objectState.id, object);
+        skeletonRegistry.register(objectState.id, object);
+        applyObjectState(objectState);
+      });
     };
 
     const roundDimensionValue = (value: number) =>
@@ -574,10 +664,7 @@ export function Viewport3D() {
         }
 
         helper.update();
-        helper.visible =
-          objectState.visible &&
-          (objectState.boundsVisible ||
-            storeRef.current.selectedObjectIds.includes(objectState.id));
+        helper.visible = objectState.visible && objectState.boundsVisible;
 
         box.setFromObject(object);
         box.getSize(size);
@@ -746,6 +833,9 @@ export function Viewport3D() {
     };
 
     const handleViewportSelection = (event: PointerEvent) => {
+      if (event.button !== 0) {
+        return;
+      }
       if (storeRef.current.cameraPreviewActive) {
         return;
       }
@@ -867,8 +957,17 @@ export function Viewport3D() {
     };
 
     const handlePointerDown = (event: PointerEvent) => {
+      if (event.button !== 0) {
+        return;
+      }
       pointerDownPosition = { x: event.clientX, y: event.clientY };
       setContextMenu(null);
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setContextMenu(null);
+      }
     };
 
     const handleContextMenu = (event: MouseEvent) => {
@@ -1178,7 +1277,6 @@ export function Viewport3D() {
       syncTransformControls();
     });
     syncCameraRigs(storeRef.current.cameras);
-    syncObjectBounds();
     syncWorldSettings();
     resizePreviewRenderer();
     void syncPanoramaBackground();
@@ -1228,6 +1326,7 @@ export function Viewport3D() {
           {
             id: objectId,
             assetId,
+            template: { kind: "glb" },
             name: file.name.replace(/\.glb$/i, ""),
             type: "model",
             visible: true,
@@ -1258,7 +1357,12 @@ export function Viewport3D() {
 
     const registerSceneObject = (
       object: THREE.Object3D,
-      config: { name: string; type: SceneObject["type"]; position?: Vec3 },
+      config: {
+        name: string;
+        type: SceneObject["type"];
+        position?: Vec3;
+        template?: SceneObject["template"];
+      },
     ) => {
       const objectId = `object_${crypto.randomUUID()}`;
       object.userData.workbenchObjectId = objectId;
@@ -1275,6 +1379,7 @@ export function Viewport3D() {
         id: objectId,
         name: config.name,
         type: config.type,
+        template: config.template,
         visible: true,
         locked: false,
         boundsVisible: false,
@@ -1290,6 +1395,10 @@ export function Viewport3D() {
         registerSceneObject(createStandinCharacter(detail.variant), {
           name: detail.variant === "female" ? "女性素体" : "男性素体",
           type: "character",
+          template: {
+            kind: "standin",
+            variant: detail.variant,
+          },
         });
         return;
       }
@@ -1306,6 +1415,10 @@ export function Viewport3D() {
         registerSceneObject(createPrimitiveObject(detail.variant), {
           name: nameMap[detail.variant],
           type: "model",
+          template: {
+            kind: "primitive",
+            variant: detail.variant,
+          },
         });
         return;
       }
@@ -1323,6 +1436,10 @@ export function Viewport3D() {
           name: `${detail.variant === "female" ? "女性群众" : "男性群众"}${index + 1}`,
           type: "character",
           position: [offsetX, 0, offsetZ],
+          template: {
+            kind: "standin",
+            variant: detail.variant,
+          },
         });
       }
     };
@@ -1331,6 +1448,13 @@ export function Viewport3D() {
       const objectId = (event as CustomEvent<string>).detail;
       if (transformControls.object === sceneRegistry.getObject(objectId)) {
         transformControls.detach();
+      }
+      const helper = objectBoundsHelpers.get(objectId);
+      if (helper) {
+        helper.parent?.remove(helper);
+        helper.geometry.dispose();
+        (helper.material as THREE.Material).dispose();
+        objectBoundsHelpers.delete(objectId);
       }
       skeletonRegistry.remove(objectId);
       sceneRegistry.removeObject(objectId);
@@ -1344,8 +1468,12 @@ export function Viewport3D() {
           cloneRuntimeObject(objectState);
         }
       });
-      syncObjectBounds();
-      syncTransformControls();
+      window.setTimeout(() => {
+        if (!disposed) {
+          syncObjectBounds();
+          syncTransformControls();
+        }
+      }, 0);
     };
 
     const handleProjectRuntimeSync = () => {
@@ -1359,10 +1487,16 @@ export function Viewport3D() {
           sceneRegistry.removeObject(objectId);
         }
       });
-      storeRef.current.objects.forEach(cloneRuntimeObject);
+      storeRef.current.objects.forEach((objectState) => {
+        cloneRuntimeObject(objectState);
+      });
       storeRef.current.objects.forEach(applyObjectState);
-      syncObjectBounds();
-      syncTransformControls();
+      window.setTimeout(() => {
+        if (!disposed) {
+          syncObjectBounds();
+          syncTransformControls();
+        }
+      }, 0);
     };
 
     const handleCameraRemove = (event: Event) => {
@@ -1722,13 +1856,17 @@ export function Viewport3D() {
     window.addEventListener("snapshot-export-request", handleSnapshotExport);
     window.addEventListener("animation-export-request", handleAnimationExport);
     window.addEventListener("beforeunload", handleBeforeUnload);
+    window.addEventListener("keydown", handleKeyDown);
     renderer.domElement.addEventListener("pointerdown", handlePointerDown);
     renderer.domElement.addEventListener("pointerup", handleViewportSelection);
     renderer.domElement.addEventListener("contextmenu", handleContextMenu);
+    storeRef.current = useProjectStore.getState();
+    handleProjectRuntimeSync();
     syncTransformControls();
     animate();
 
     return () => {
+      disposed = true;
       cancelAnimationFrame(animationFrame);
       unsubscribeSceneSync();
       window.removeEventListener("resize", resize);
@@ -1747,6 +1885,7 @@ export function Viewport3D() {
       window.removeEventListener("snapshot-export-request", handleSnapshotExport);
       window.removeEventListener("animation-export-request", handleAnimationExport);
       window.removeEventListener("beforeunload", handleBeforeUnload);
+      window.removeEventListener("keydown", handleKeyDown);
       renderer.domElement.removeEventListener("pointerdown", handlePointerDown);
       renderer.domElement.removeEventListener("pointerup", handleViewportSelection);
       renderer.domElement.removeEventListener("contextmenu", handleContextMenu);
@@ -1778,6 +1917,7 @@ export function Viewport3D() {
           style={{ left: contextMenu.x, top: contextMenu.y }}
         >
           <button
+            disabled={!hasSelection}
             type="button"
             onClick={() => {
               useProjectStore.getState().copySelection();
@@ -1787,6 +1927,7 @@ export function Viewport3D() {
             复制
           </button>
           <button
+            disabled={!hasClipboard}
             type="button"
             onClick={() => {
               useProjectStore.getState().pasteClipboard();
@@ -1796,6 +1937,7 @@ export function Viewport3D() {
             粘贴
           </button>
           <button
+            disabled={!canGroup}
             type="button"
             onClick={() => {
               useProjectStore.getState().groupSelection();
@@ -1805,6 +1947,7 @@ export function Viewport3D() {
             成组
           </button>
           <button
+            disabled={!canUngroup}
             type="button"
             onClick={() => {
               useProjectStore.getState().ungroupSelection();
@@ -1814,6 +1957,7 @@ export function Viewport3D() {
             解组
           </button>
           <button
+            disabled={!hasSelection}
             type="button"
             onClick={() => {
               useProjectStore.getState().snapSelectionToGround();
@@ -1823,16 +1967,8 @@ export function Viewport3D() {
             吸附到地面
           </button>
           <button
-            type="button"
-            onClick={() => {
-              useProjectStore.getState().alignSelection("x");
-              setContextMenu(null);
-            }}
-          >
-            X 对齐
-          </button>
-          <button
             className="danger-action"
+            disabled={!hasSelection}
             type="button"
             onClick={() => {
               useProjectStore.getState().removeSelection();

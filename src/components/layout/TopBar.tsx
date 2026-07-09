@@ -1,6 +1,7 @@
 import { CircleHelp, FolderOpen, LogOut, RotateCcw, RotateCw, Save, X } from "lucide-react";
 import type { ChangeEvent } from "react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { subscribeAppFeedback } from "../../app/appFeedback";
 import { parseProjectJson } from "../../domain/projectSerialization";
 import { downloadProjectFile } from "../../export/projectExport";
 import { useProjectStore } from "../../store/projectStore";
@@ -19,6 +20,8 @@ export function TopBar() {
     setFeedback(message);
     window.setTimeout(() => setFeedback(""), 1800);
   };
+
+  useEffect(() => subscribeAppFeedback(showFeedback), []);
 
   const handleSave = () => {
     downloadProjectFile(useProjectStore.getState());

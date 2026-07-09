@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { emitAppFeedback } from "./appFeedback";
 import { BottomToolbar } from "../components/layout/BottomToolbar";
 import { LeftPanel } from "../components/layout/LeftPanel";
 import { RightPanel } from "../components/layout/RightPanel";
@@ -21,14 +22,21 @@ export function App() {
   const [timelineExpanded, setTimelineExpanded] = useState(false);
   const [timelineHeight, setTimelineHeight] = useState(420);
   const isPlaying = useProjectStore((state) => state.animation.isPlaying);
+  const autosaveRestoreAttemptedRef = useRef(false);
 
   useEffect(() => {
+    if (autosaveRestoreAttemptedRef.current) {
+      return;
+    }
+    autosaveRestoreAttemptedRef.current = true;
     const saved = window.localStorage.getItem(autosaveKey);
     if (saved && window.confirm("检测到自动保存的项目，是否恢复？")) {
       try {
         useProjectStore.getState().replaceProject(parseProjectJson(saved));
+        emitAppFeedback("已恢复自动保存项目");
       } catch {
         window.localStorage.removeItem(autosaveKey);
+        emitAppFeedback("自动保存恢复失败，已忽略损坏记录");
       }
     }
   }, []);
@@ -38,7 +46,14 @@ export function App() {
     const unsubscribe = useProjectStore.subscribe((state) => {
       window.clearTimeout(timeoutId);
       timeoutId = window.setTimeout(() => {
-        window.localStorage.setItem(autosaveKey, serializeProject(state));
+        try {
+          window.localStorage.setItem(
+            autosaveKey,
+            serializeProject(state, { includeSnapshots: false }),
+          );
+        } catch {
+          emitAppFeedback("自动保存空间不足，本次未保存快照数据");
+        }
       }, 600);
     });
     return () => {

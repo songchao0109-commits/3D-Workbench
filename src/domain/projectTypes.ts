@@ -1,5 +1,18 @@
 export type Vec3 = [number, number, number];
 
+export type SceneObjectTemplate =
+  | {
+      kind: "standin";
+      variant: "male" | "female";
+    }
+  | {
+      kind: "primitive";
+      variant: "cube" | "sphere" | "cylinder" | "torus" | "cone" | "pyramid";
+    }
+  | {
+      kind: "glb";
+    };
+
 export type ToolMode =
   | "move"
   | "object"
@@ -122,6 +135,7 @@ export type SceneObject = {
   id: string;
   assetId?: string;
   sourceObjectId?: string;
+  template?: SceneObjectTemplate;
   name: string;
   type: "character" | "model" | "helper";
   visible: boolean;

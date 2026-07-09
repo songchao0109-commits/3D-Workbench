@@ -43,6 +43,10 @@ export const defaultProject: ProjectState = {
       id: "object_character_a",
       name: "角色A",
       type: "character",
+      template: {
+        kind: "standin",
+        variant: "male",
+      },
       visible: true,
       locked: false,
       boundsVisible: false,
