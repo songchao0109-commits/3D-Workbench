@@ -5,6 +5,7 @@ export const defaultProject: ProjectState = {
   projectName: "3D 导演台",
   activeShotId: "shot_001",
   activeCameraId: "camera_001",
+  selectedObjectIds: [],
   activeTool: "move",
   transformMode: "translate",
   outputFrame: {
@@ -36,11 +37,16 @@ export const defaultProject: ProjectState = {
     },
   },
   assets: [],
+  groups: [],
   objects: [
     {
       id: "object_character_a",
       name: "角色A",
       type: "character",
+      template: {
+        kind: "standin",
+        variant: "male",
+      },
       visible: true,
       locked: false,
       boundsVisible: false,

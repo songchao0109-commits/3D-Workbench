@@ -1,5 +1,18 @@
 export type Vec3 = [number, number, number];
 
+export type SceneObjectTemplate =
+  | {
+      kind: "standin";
+      variant: "male" | "female";
+    }
+  | {
+      kind: "primitive";
+      variant: "cube" | "sphere" | "cylinder" | "torus" | "cone" | "pyramid";
+    }
+  | {
+      kind: "glb";
+    };
+
 export type ToolMode =
   | "move"
   | "object"
@@ -121,6 +134,8 @@ export type ObjectRig = {
 export type SceneObject = {
   id: string;
   assetId?: string;
+  sourceObjectId?: string;
+  template?: SceneObjectTemplate;
   name: string;
   type: "character" | "model" | "helper";
   visible: boolean;
@@ -132,6 +147,18 @@ export type SceneObject = {
   actualDimensions?: Vec3;
   materialOverrides?: MaterialOverride[];
   rig?: ObjectRig;
+};
+
+export type SceneGroup = {
+  id: string;
+  name: string;
+  visible: boolean;
+  locked: boolean;
+  collapsed: boolean;
+  objectIds: string[];
+  position: Vec3;
+  rotation: Vec3;
+  scale: Vec3;
 };
 
 export type SceneCamera = {
@@ -224,6 +251,8 @@ export type ProjectState = {
   projectName: string;
   activeShotId: string;
   activeObjectId?: string;
+  activeGroupId?: string;
+  selectedObjectIds: string[];
   selectedCameraId?: string;
   activeCameraId?: string;
   activeTool: ToolMode;
@@ -233,6 +262,7 @@ export type ProjectState = {
   worldSettings: WorldSettings;
   assets: AssetRecord[];
   objects: SceneObject[];
+  groups: SceneGroup[];
   cameras: SceneCamera[];
   snapshots: SnapshotRecord[];
   animation: AnimationTimelineState;

@@ -41,6 +41,9 @@ export const sceneRegistry = {
   getObject(objectId: string) {
     return objectMap.get(objectId);
   },
+  getObjectIds() {
+    return Array.from(objectMap.keys());
+  },
   unregisterObject(objectId: string) {
     objectMap.delete(objectId);
   },

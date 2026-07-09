@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import * as THREE from "three";
+import { emitAppFeedback } from "../../app/appFeedback";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
 import { resolveCameraTarget } from "../../domain/cameraTargets";
@@ -30,6 +31,7 @@ import {
 import {
   extractRigFromScene,
   loadGlbFromFile,
+  loadGlbFromUrl,
   normalizeImportedScene,
 } from "../../three/glbLoader";
 import {
@@ -71,6 +73,15 @@ const defaultOrientationAxes: OrientationAxis[] = [
   { id: "z", label: "Z", x: -13, y: 11, length: 17, angle: 140, depth: 0 },
 ];
 
+const pivotPosition = new THREE.Vector3();
+const pivotMatrixPrevious = new THREE.Matrix4();
+const pivotMatrixNext = new THREE.Matrix4();
+const pivotDeltaMatrix = new THREE.Matrix4();
+const objectMatrix = new THREE.Matrix4();
+const objectNextPosition = new THREE.Vector3();
+const objectNextQuaternion = new THREE.Quaternion();
+const objectNextScale = new THREE.Vector3();
+
 function createRenderer(container: HTMLDivElement) {
   const renderer = new THREE.WebGLRenderer({
     antialias: true,
@@ -90,10 +101,46 @@ export function Viewport3D() {
   const [viewportLabels, setViewportLabels] = useState<
     Array<{ id: string; label: string; x: number; y: number; active: boolean }>
   >([]);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [orientationAxes, setOrientationAxes] = useState(defaultOrientationAxes);
   const orientationAxesRef = useRef(defaultOrientationAxes);
   const cameraPreviewActive = useProjectStore((state) => state.cameraPreviewActive);
   const outputFrame = useProjectStore((state) => state.outputFrame);
+  const hasSelection = useProjectStore((state) => {
+    const selectedIds = state.selectedObjectIds.length
+      ? state.selectedObjectIds
+      : state.activeObjectId
+        ? [state.activeObjectId]
+        : [];
+    return selectedIds.length > 0 || Boolean(state.activeGroupId);
+  });
+  const hasClipboard = useProjectStore((state) =>
+    Boolean(state.clipboard?.objects.length || state.clipboard?.groups.length),
+  );
+  const canGroup = useProjectStore((state) => {
+    const selectedIds = state.selectedObjectIds.length
+      ? state.selectedObjectIds
+      : state.activeObjectId
+        ? [state.activeObjectId]
+        : [];
+    return (
+      selectedIds.length > 1 &&
+      selectedIds.every(
+        (objectId) => !state.groups.some((group) => group.objectIds.includes(objectId)),
+      )
+    );
+  });
+  const canUngroup = useProjectStore((state) => {
+    const selectedIds = state.selectedObjectIds.length
+      ? state.selectedObjectIds
+      : state.activeObjectId
+        ? [state.activeObjectId]
+        : [];
+    const selectedGroups = state.groups.filter((group) =>
+      selectedIds.some((objectId) => group.objectIds.includes(objectId)),
+    );
+    return Boolean(state.activeGroupId) || selectedGroups.length > 0;
+  });
 
   useEffect(() => {
     const unsubscribe = useProjectStore.subscribe((state) => {
@@ -149,6 +196,7 @@ export function Viewport3D() {
     ];
     const cameraRigs = new Map<string, THREE.Object3D>();
     const objectBoundsHelpers = new Map<string, THREE.BoxHelper>();
+    const runtimeLoadWarnings = new Set<string>();
     let activeCameraAimId: string | undefined;
     let panoramaTexture: THREE.Texture | undefined;
     let loadedPanoramaAssetId: string | undefined;
@@ -217,11 +265,20 @@ export function Viewport3D() {
 
     const transformControls = new TransformControls(camera, renderer.domElement);
     const transformHelper = transformControls.getHelper();
+    const selectionPivot = new THREE.Group();
+    selectionPivot.name = "selection-pivot";
+    selectionPivot.visible = false;
     scene.add(transformHelper);
+    scene.add(selectionPivot);
     transformControls.addEventListener("dragging-changed", (event) => {
+      const store = useProjectStore.getState();
+      if (event.value) {
+        store.beginHistoryDraft();
+      }
       draggingRef.current = Boolean(event.value);
       controls.enabled = !event.value;
       if (!event.value) {
+        store.commitHistoryDraft();
         const state = useProjectStore.getState();
         state.objects.forEach(applyObjectState);
         syncObjectBounds();
@@ -240,6 +297,37 @@ export function Viewport3D() {
       const boneId = object?.userData.workbenchBoneId;
       const ikChainId = object?.userData.workbenchIkChainId;
       if (!object) {
+        return;
+      }
+      if (object === selectionPivot) {
+        const state = useProjectStore.getState();
+        const activeGroup = state.activeGroupId
+          ? state.groups.find((group) => group.id === state.activeGroupId)
+          : undefined;
+        const selectedIds = activeGroup?.objectIds ?? state.selectedObjectIds;
+        pivotMatrixNext.copy(selectionPivot.matrixWorld);
+        pivotDeltaMatrix.copy(pivotMatrixNext).multiply(pivotMatrixPrevious.clone().invert());
+        selectedIds.forEach((selectedId) => {
+          const selectedState = state.objects.find((item) => item.id === selectedId);
+          const selectedObject = sceneRegistry.getObject(selectedId);
+          if (!selectedState || !selectedObject || selectedState.locked) {
+            return;
+          }
+          objectMatrix.compose(
+            selectedObject.position,
+            selectedObject.quaternion,
+            selectedObject.scale,
+          );
+          objectMatrix.premultiply(pivotDeltaMatrix);
+          objectMatrix.decompose(objectNextPosition, objectNextQuaternion, objectNextScale);
+          const rotation = new THREE.Euler().setFromQuaternion(objectNextQuaternion);
+          useProjectStore.getState().updateObjectTransform(selectedId, {
+            position: [objectNextPosition.x, objectNextPosition.y, objectNextPosition.z],
+            rotation: [rotation.x, rotation.y, rotation.z],
+            scale: [objectNextScale.x, objectNextScale.y, objectNextScale.z],
+          });
+        });
+        pivotMatrixPrevious.copy(pivotMatrixNext);
         return;
       }
       if (typeof cameraAimId === "string") {
@@ -395,12 +483,6 @@ export function Viewport3D() {
     keyLight.position.set(6, 10, 5);
     scene.add(ambient, keyLight);
 
-    const placeholder = createPlaceholderCharacter();
-    placeholder.position.set(0, 0, 0);
-    placeholder.userData.workbenchObjectId = "object_character_a";
-    worldRoot.add(placeholder);
-    sceneRegistry.registerObject("object_character_a", placeholder);
-
     const resize = () => {
       const width = container.clientWidth;
       const height = container.clientHeight;
@@ -474,6 +556,82 @@ export function Viewport3D() {
       skeletonRegistry.sync(objectState.id, objectState.rig);
     };
 
+    const markRuntimeObject = (object: THREE.Object3D, objectId: string) => {
+      object.userData.workbenchObjectId = objectId;
+      object.traverse((child) => {
+        if (typeof child.userData.workbenchObjectId === "string") {
+          child.userData.workbenchObjectId = objectId;
+        }
+      });
+    };
+
+    let disposed = false;
+
+    const createRuntimeObjectFromState = (objectState: SceneObject) => {
+      if (objectState.assetId) {
+        const asset = storeRef.current.assets.find((item) => item.id === objectState.assetId);
+        if (asset?.type === "glb" && asset.objectUrl) {
+          return loadGlbFromUrl(asset.objectUrl).then((scene) => {
+            normalizeImportedScene(scene);
+            return scene;
+          }).catch(() => {
+            if (!runtimeLoadWarnings.has(objectState.id)) {
+              runtimeLoadWarnings.add(objectState.id);
+              emitAppFeedback(`对象“${objectState.name}”的模型资源缺失，已用占位体代替`);
+            }
+            return createPlaceholderCharacter();
+          });
+        }
+      }
+
+      const template =
+        objectState.template ??
+        (objectState.type === "character"
+          ? {
+              kind: "standin" as const,
+              variant: objectState.name.includes("女性") ? "female" : "male",
+            }
+          : undefined);
+
+      if (template?.kind === "standin") {
+        return createStandinCharacter(template.variant);
+      }
+      if (template?.kind === "primitive") {
+        return createPrimitiveObject(template.variant);
+      }
+      return createPlaceholderCharacter();
+    };
+
+    const cloneRuntimeObject = (objectState: SceneObject) => {
+      const existing = sceneRegistry.getObject(objectState.id);
+      if (existing && existing.parent === worldRoot) {
+        return;
+      }
+      if (existing && existing.parent !== worldRoot) {
+        sceneRegistry.unregisterObject(objectState.id);
+      }
+      const source = objectState.sourceObjectId
+        ? sceneRegistry.getObject(objectState.sourceObjectId)
+        : undefined;
+      const runtimeObject = source ? source.clone(true) : createRuntimeObjectFromState(objectState);
+      Promise.resolve(runtimeObject).then((object) => {
+        if (disposed) {
+          disposeObject3D(object);
+          return;
+        }
+        const current = sceneRegistry.getObject(objectState.id);
+        if (current && current.parent === worldRoot) {
+          disposeObject3D(object);
+          return;
+        }
+        markRuntimeObject(object, objectState.id);
+        worldRoot.add(object);
+        sceneRegistry.registerObject(objectState.id, object);
+        skeletonRegistry.register(objectState.id, object);
+        applyObjectState(objectState);
+      });
+    };
+
     const roundDimensionValue = (value: number) =>
       Math.round(Math.max(0, value) * 1000) / 1000;
 
@@ -506,7 +664,7 @@ export function Viewport3D() {
         }
 
         helper.update();
-        helper.visible = objectState.boundsVisible && objectState.visible;
+        helper.visible = objectState.visible && objectState.boundsVisible;
 
         box.setFromObject(object);
         box.getSize(size);
@@ -675,6 +833,9 @@ export function Viewport3D() {
     };
 
     const handleViewportSelection = (event: PointerEvent) => {
+      if (event.button !== 0) {
+        return;
+      }
       if (storeRef.current.cameraPreviewActive) {
         return;
       }
@@ -767,7 +928,11 @@ export function Viewport3D() {
       }
       if (matched.type === "object") {
         activeCameraAimId = undefined;
-        useProjectStore.getState().setActiveObject(matched.id);
+        if (event.shiftKey || event.metaKey || event.ctrlKey) {
+          useProjectStore.getState().toggleObjectSelection(matched.id);
+        } else {
+          useProjectStore.getState().setActiveObject(matched.id);
+        }
         return;
       }
       if (matched.type === "bone") {
@@ -792,7 +957,42 @@ export function Viewport3D() {
     };
 
     const handlePointerDown = (event: PointerEvent) => {
+      if (event.button !== 0) {
+        return;
+      }
       pointerDownPosition = { x: event.clientX, y: event.clientY };
+      setContextMenu(null);
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setContextMenu(null);
+      }
+    };
+
+    const handleContextMenu = (event: MouseEvent) => {
+      event.preventDefault();
+      if (storeRef.current.cameraPreviewActive) {
+        return;
+      }
+      const rect = renderer.domElement.getBoundingClientRect();
+      pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+      pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(pointer, camera);
+      const objectPickTargets = storeRef.current.objects
+        .map((item) => sceneRegistry.getObject(item.id))
+        .filter((item): item is THREE.Object3D => Boolean(item));
+      const matched = raycaster
+        .intersectObjects(objectPickTargets, true)
+        .map((intersection) => resolveSelectableTarget(intersection.object))
+        .find((target) => target?.type === "object");
+      if (matched?.type === "object") {
+        const current = useProjectStore.getState();
+        if (!current.selectedObjectIds.includes(matched.id)) {
+          current.setActiveObject(matched.id);
+        }
+      }
+      setContextMenu({ x: event.clientX, y: event.clientY });
     };
 
     const syncTransformControls = () => {
@@ -809,6 +1009,50 @@ export function Viewport3D() {
       }
       if (state.cameraPreviewActive) {
         transformControls.detach();
+        return;
+      }
+      const activeGroup = state.activeGroupId
+        ? state.groups.find((group) => group.id === state.activeGroupId)
+        : undefined;
+      const transformSelectionIds =
+        activeGroup?.objectIds ??
+        (state.selectedObjectIds.length > 1 ? state.selectedObjectIds : []);
+      if (transformSelectionIds.length > 1) {
+        const selectableObjects = transformSelectionIds
+          .map((id) => ({
+            objectState: state.objects.find((object) => object.id === id),
+            runtime: sceneRegistry.getObject(id),
+          }))
+          .filter(
+            (item): item is { objectState: SceneObject; runtime: THREE.Object3D } => {
+              if (!item.objectState || !item.runtime) {
+                return false;
+              }
+              return item.objectState.visible && !item.objectState.locked;
+            },
+          );
+        if (
+          !selectableObjects.length ||
+          (activeGroup && (activeGroup.locked || !activeGroup.visible))
+        ) {
+          transformControls.detach();
+          return;
+        }
+        pivotPosition.set(0, 0, 0);
+        selectableObjects.forEach(({ runtime }) => {
+          pivotPosition.add(runtime.position);
+        });
+        pivotPosition.multiplyScalar(1 / selectableObjects.length);
+        if (transformControls.object !== selectionPivot || !draggingRef.current) {
+          selectionPivot.position.copy(pivotPosition);
+          selectionPivot.rotation.set(0, 0, 0);
+          selectionPivot.scale.set(1, 1, 1);
+          selectionPivot.updateMatrixWorld(true);
+          pivotMatrixPrevious.copy(selectionPivot.matrixWorld);
+          transformControls.attach(selectionPivot);
+        }
+        transformControls.setMode(state.transformMode);
+        transformControls.space = "world";
         return;
       }
       const activeObjectId = state.activeObjectId;
@@ -1033,7 +1277,6 @@ export function Viewport3D() {
       syncTransformControls();
     });
     syncCameraRigs(storeRef.current.cameras);
-    syncObjectBounds();
     syncWorldSettings();
     resizePreviewRenderer();
     void syncPanoramaBackground();
@@ -1083,6 +1326,7 @@ export function Viewport3D() {
           {
             id: objectId,
             assetId,
+            template: { kind: "glb" },
             name: file.name.replace(/\.glb$/i, ""),
             type: "model",
             visible: true,
@@ -1113,7 +1357,12 @@ export function Viewport3D() {
 
     const registerSceneObject = (
       object: THREE.Object3D,
-      config: { name: string; type: SceneObject["type"]; position?: Vec3 },
+      config: {
+        name: string;
+        type: SceneObject["type"];
+        position?: Vec3;
+        template?: SceneObject["template"];
+      },
     ) => {
       const objectId = `object_${crypto.randomUUID()}`;
       object.userData.workbenchObjectId = objectId;
@@ -1130,6 +1379,7 @@ export function Viewport3D() {
         id: objectId,
         name: config.name,
         type: config.type,
+        template: config.template,
         visible: true,
         locked: false,
         boundsVisible: false,
@@ -1145,6 +1395,10 @@ export function Viewport3D() {
         registerSceneObject(createStandinCharacter(detail.variant), {
           name: detail.variant === "female" ? "女性素体" : "男性素体",
           type: "character",
+          template: {
+            kind: "standin",
+            variant: detail.variant,
+          },
         });
         return;
       }
@@ -1161,6 +1415,10 @@ export function Viewport3D() {
         registerSceneObject(createPrimitiveObject(detail.variant), {
           name: nameMap[detail.variant],
           type: "model",
+          template: {
+            kind: "primitive",
+            variant: detail.variant,
+          },
         });
         return;
       }
@@ -1178,6 +1436,10 @@ export function Viewport3D() {
           name: `${detail.variant === "female" ? "女性群众" : "男性群众"}${index + 1}`,
           type: "character",
           position: [offsetX, 0, offsetZ],
+          template: {
+            kind: "standin",
+            variant: detail.variant,
+          },
         });
       }
     };
@@ -1187,8 +1449,54 @@ export function Viewport3D() {
       if (transformControls.object === sceneRegistry.getObject(objectId)) {
         transformControls.detach();
       }
+      const helper = objectBoundsHelpers.get(objectId);
+      if (helper) {
+        helper.parent?.remove(helper);
+        helper.geometry.dispose();
+        (helper.material as THREE.Material).dispose();
+        objectBoundsHelpers.delete(objectId);
+      }
       skeletonRegistry.remove(objectId);
       sceneRegistry.removeObject(objectId);
+    };
+
+    const handleObjectsClone = (event: Event) => {
+      const detail = (event as CustomEvent<Array<{ objectId: string }>>).detail;
+      detail.forEach(({ objectId }) => {
+        const objectState = storeRef.current.objects.find((object) => object.id === objectId);
+        if (objectState) {
+          cloneRuntimeObject(objectState);
+        }
+      });
+      window.setTimeout(() => {
+        if (!disposed) {
+          syncObjectBounds();
+          syncTransformControls();
+        }
+      }, 0);
+    };
+
+    const handleProjectRuntimeSync = () => {
+      const objectIds = new Set(storeRef.current.objects.map((object) => object.id));
+      sceneRegistry.getObjectIds().forEach((objectId) => {
+        if (!objectIds.has(objectId)) {
+          if (transformControls.object === sceneRegistry.getObject(objectId)) {
+            transformControls.detach();
+          }
+          skeletonRegistry.remove(objectId);
+          sceneRegistry.removeObject(objectId);
+        }
+      });
+      storeRef.current.objects.forEach((objectState) => {
+        cloneRuntimeObject(objectState);
+      });
+      storeRef.current.objects.forEach(applyObjectState);
+      window.setTimeout(() => {
+        if (!disposed) {
+          syncObjectBounds();
+          syncTransformControls();
+        }
+      }, 0);
     };
 
     const handleCameraRemove = (event: Event) => {
@@ -1539,6 +1847,8 @@ export function Viewport3D() {
     window.addEventListener("glb-import-request", handleGlbImport);
     window.addEventListener("scene-object-create-request", handleSceneInsert);
     window.addEventListener("scene-object-remove-request", handleObjectRemove);
+    window.addEventListener("scene-objects-clone-request", handleObjectsClone);
+    window.addEventListener("project-runtime-sync-request", handleProjectRuntimeSync);
     window.addEventListener("scene-camera-remove-request", handleCameraRemove);
     window.addEventListener("camera-create-from-view-request", handleCameraCreateFromView);
     window.addEventListener("panorama-import-request", handlePanoramaImport);
@@ -1546,18 +1856,25 @@ export function Viewport3D() {
     window.addEventListener("snapshot-export-request", handleSnapshotExport);
     window.addEventListener("animation-export-request", handleAnimationExport);
     window.addEventListener("beforeunload", handleBeforeUnload);
+    window.addEventListener("keydown", handleKeyDown);
     renderer.domElement.addEventListener("pointerdown", handlePointerDown);
     renderer.domElement.addEventListener("pointerup", handleViewportSelection);
+    renderer.domElement.addEventListener("contextmenu", handleContextMenu);
+    storeRef.current = useProjectStore.getState();
+    handleProjectRuntimeSync();
     syncTransformControls();
     animate();
 
     return () => {
+      disposed = true;
       cancelAnimationFrame(animationFrame);
       unsubscribeSceneSync();
       window.removeEventListener("resize", resize);
       window.removeEventListener("glb-import-request", handleGlbImport);
       window.removeEventListener("scene-object-create-request", handleSceneInsert);
       window.removeEventListener("scene-object-remove-request", handleObjectRemove);
+      window.removeEventListener("scene-objects-clone-request", handleObjectsClone);
+      window.removeEventListener("project-runtime-sync-request", handleProjectRuntimeSync);
       window.removeEventListener("scene-camera-remove-request", handleCameraRemove);
       window.removeEventListener(
         "camera-create-from-view-request",
@@ -1568,8 +1885,10 @@ export function Viewport3D() {
       window.removeEventListener("snapshot-export-request", handleSnapshotExport);
       window.removeEventListener("animation-export-request", handleAnimationExport);
       window.removeEventListener("beforeunload", handleBeforeUnload);
+      window.removeEventListener("keydown", handleKeyDown);
       renderer.domElement.removeEventListener("pointerdown", handlePointerDown);
       renderer.domElement.removeEventListener("pointerup", handleViewportSelection);
+      renderer.domElement.removeEventListener("contextmenu", handleContextMenu);
       transformControls.detach();
       transformControls.dispose();
       Array.from(objectBoundsHelpers.values()).forEach((helper) => {
@@ -1592,6 +1911,74 @@ export function Viewport3D() {
 
   return (
     <div className="viewport-stage" ref={containerRef}>
+      {contextMenu ? (
+        <div
+          className="viewport-context-menu"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+        >
+          <button
+            disabled={!hasSelection}
+            type="button"
+            onClick={() => {
+              useProjectStore.getState().copySelection();
+              setContextMenu(null);
+            }}
+          >
+            复制
+          </button>
+          <button
+            disabled={!hasClipboard}
+            type="button"
+            onClick={() => {
+              useProjectStore.getState().pasteClipboard();
+              setContextMenu(null);
+            }}
+          >
+            粘贴
+          </button>
+          <button
+            disabled={!canGroup}
+            type="button"
+            onClick={() => {
+              useProjectStore.getState().groupSelection();
+              setContextMenu(null);
+            }}
+          >
+            成组
+          </button>
+          <button
+            disabled={!canUngroup}
+            type="button"
+            onClick={() => {
+              useProjectStore.getState().ungroupSelection();
+              setContextMenu(null);
+            }}
+          >
+            解组
+          </button>
+          <button
+            disabled={!hasSelection}
+            type="button"
+            onClick={() => {
+              useProjectStore.getState().snapSelectionToGround();
+              setContextMenu(null);
+            }}
+          >
+            吸附到地面
+          </button>
+          <button
+            className="danger-action"
+            disabled={!hasSelection}
+            type="button"
+            onClick={() => {
+              useProjectStore.getState().removeSelection();
+              setContextMenu(null);
+            }}
+          >
+            删除
+          </button>
+        </div>
+      ) : null}
       <div className="viewport-hud">
         <div className="orientation-widget">
           <span className="orientation-origin" />
