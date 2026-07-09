@@ -4,9 +4,5 @@ dist/
 vite.config.js
 vite.config.d.ts
 .DS_Store
-docs/prd/*
-!docs/prd/change-log.md
-!docs/prd/p0-foundation-editing-prd.md
-!docs/prd/p0-foundation-editing-plan.md
-!docs/prd/p0-p4-director-console-roadmap.md
+docs/prd/
 docs/development-policy.md
