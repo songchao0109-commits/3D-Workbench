@@ -71,6 +71,15 @@ const defaultOrientationAxes: OrientationAxis[] = [
   { id: "z", label: "Z", x: -13, y: 11, length: 17, angle: 140, depth: 0 },
 ];
 
+const pivotPosition = new THREE.Vector3();
+const pivotMatrixPrevious = new THREE.Matrix4();
+const pivotMatrixNext = new THREE.Matrix4();
+const pivotDeltaMatrix = new THREE.Matrix4();
+const objectMatrix = new THREE.Matrix4();
+const objectNextPosition = new THREE.Vector3();
+const objectNextQuaternion = new THREE.Quaternion();
+const objectNextScale = new THREE.Vector3();
+
 function createRenderer(container: HTMLDivElement) {
   const renderer = new THREE.WebGLRenderer({
     antialias: true,
@@ -90,6 +99,7 @@ export function Viewport3D() {
   const [viewportLabels, setViewportLabels] = useState<
     Array<{ id: string; label: string; x: number; y: number; active: boolean }>
   >([]);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [orientationAxes, setOrientationAxes] = useState(defaultOrientationAxes);
   const orientationAxesRef = useRef(defaultOrientationAxes);
   const cameraPreviewActive = useProjectStore((state) => state.cameraPreviewActive);
@@ -217,7 +227,11 @@ export function Viewport3D() {
 
     const transformControls = new TransformControls(camera, renderer.domElement);
     const transformHelper = transformControls.getHelper();
+    const selectionPivot = new THREE.Group();
+    selectionPivot.name = "selection-pivot";
+    selectionPivot.visible = false;
     scene.add(transformHelper);
+    scene.add(selectionPivot);
     transformControls.addEventListener("dragging-changed", (event) => {
       draggingRef.current = Boolean(event.value);
       controls.enabled = !event.value;
@@ -240,6 +254,37 @@ export function Viewport3D() {
       const boneId = object?.userData.workbenchBoneId;
       const ikChainId = object?.userData.workbenchIkChainId;
       if (!object) {
+        return;
+      }
+      if (object === selectionPivot) {
+        const state = useProjectStore.getState();
+        const activeGroup = state.activeGroupId
+          ? state.groups.find((group) => group.id === state.activeGroupId)
+          : undefined;
+        const selectedIds = activeGroup?.objectIds ?? state.selectedObjectIds;
+        pivotMatrixNext.copy(selectionPivot.matrixWorld);
+        pivotDeltaMatrix.copy(pivotMatrixNext).multiply(pivotMatrixPrevious.clone().invert());
+        selectedIds.forEach((selectedId) => {
+          const selectedState = state.objects.find((item) => item.id === selectedId);
+          const selectedObject = sceneRegistry.getObject(selectedId);
+          if (!selectedState || !selectedObject || selectedState.locked) {
+            return;
+          }
+          objectMatrix.compose(
+            selectedObject.position,
+            selectedObject.quaternion,
+            selectedObject.scale,
+          );
+          objectMatrix.premultiply(pivotDeltaMatrix);
+          objectMatrix.decompose(objectNextPosition, objectNextQuaternion, objectNextScale);
+          const rotation = new THREE.Euler().setFromQuaternion(objectNextQuaternion);
+          useProjectStore.getState().updateObjectTransform(selectedId, {
+            position: [objectNextPosition.x, objectNextPosition.y, objectNextPosition.z],
+            rotation: [rotation.x, rotation.y, rotation.z],
+            scale: [objectNextScale.x, objectNextScale.y, objectNextScale.z],
+          });
+        });
+        pivotMatrixPrevious.copy(pivotMatrixNext);
         return;
       }
       if (typeof cameraAimId === "string") {
@@ -474,6 +519,29 @@ export function Viewport3D() {
       skeletonRegistry.sync(objectState.id, objectState.rig);
     };
 
+    const markRuntimeObject = (object: THREE.Object3D, objectId: string) => {
+      object.userData.workbenchObjectId = objectId;
+      object.traverse((child) => {
+        if (typeof child.userData.workbenchObjectId === "string") {
+          child.userData.workbenchObjectId = objectId;
+        }
+      });
+    };
+
+    const cloneRuntimeObject = (objectState: SceneObject) => {
+      if (sceneRegistry.getObject(objectState.id)) {
+        return;
+      }
+      const source = objectState.sourceObjectId
+        ? sceneRegistry.getObject(objectState.sourceObjectId)
+        : undefined;
+      const object = source ? source.clone(true) : createPlaceholderCharacter();
+      markRuntimeObject(object, objectState.id);
+      worldRoot.add(object);
+      sceneRegistry.registerObject(objectState.id, object);
+      applyObjectState(objectState);
+    };
+
     const roundDimensionValue = (value: number) =>
       Math.round(Math.max(0, value) * 1000) / 1000;
 
@@ -506,7 +574,10 @@ export function Viewport3D() {
         }
 
         helper.update();
-        helper.visible = objectState.boundsVisible && objectState.visible;
+        helper.visible =
+          objectState.visible &&
+          (objectState.boundsVisible ||
+            storeRef.current.selectedObjectIds.includes(objectState.id));
 
         box.setFromObject(object);
         box.getSize(size);
@@ -767,7 +838,11 @@ export function Viewport3D() {
       }
       if (matched.type === "object") {
         activeCameraAimId = undefined;
-        useProjectStore.getState().setActiveObject(matched.id);
+        if (event.shiftKey || event.metaKey || event.ctrlKey) {
+          useProjectStore.getState().toggleObjectSelection(matched.id);
+        } else {
+          useProjectStore.getState().setActiveObject(matched.id);
+        }
         return;
       }
       if (matched.type === "bone") {
@@ -793,6 +868,32 @@ export function Viewport3D() {
 
     const handlePointerDown = (event: PointerEvent) => {
       pointerDownPosition = { x: event.clientX, y: event.clientY };
+      setContextMenu(null);
+    };
+
+    const handleContextMenu = (event: MouseEvent) => {
+      event.preventDefault();
+      if (storeRef.current.cameraPreviewActive) {
+        return;
+      }
+      const rect = renderer.domElement.getBoundingClientRect();
+      pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+      pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(pointer, camera);
+      const objectPickTargets = storeRef.current.objects
+        .map((item) => sceneRegistry.getObject(item.id))
+        .filter((item): item is THREE.Object3D => Boolean(item));
+      const matched = raycaster
+        .intersectObjects(objectPickTargets, true)
+        .map((intersection) => resolveSelectableTarget(intersection.object))
+        .find((target) => target?.type === "object");
+      if (matched?.type === "object") {
+        const current = useProjectStore.getState();
+        if (!current.selectedObjectIds.includes(matched.id)) {
+          current.setActiveObject(matched.id);
+        }
+      }
+      setContextMenu({ x: event.clientX, y: event.clientY });
     };
 
     const syncTransformControls = () => {
@@ -809,6 +910,50 @@ export function Viewport3D() {
       }
       if (state.cameraPreviewActive) {
         transformControls.detach();
+        return;
+      }
+      const activeGroup = state.activeGroupId
+        ? state.groups.find((group) => group.id === state.activeGroupId)
+        : undefined;
+      const transformSelectionIds =
+        activeGroup?.objectIds ??
+        (state.selectedObjectIds.length > 1 ? state.selectedObjectIds : []);
+      if (transformSelectionIds.length > 1) {
+        const selectableObjects = transformSelectionIds
+          .map((id) => ({
+            objectState: state.objects.find((object) => object.id === id),
+            runtime: sceneRegistry.getObject(id),
+          }))
+          .filter(
+            (item): item is { objectState: SceneObject; runtime: THREE.Object3D } => {
+              if (!item.objectState || !item.runtime) {
+                return false;
+              }
+              return item.objectState.visible && !item.objectState.locked;
+            },
+          );
+        if (
+          !selectableObjects.length ||
+          (activeGroup && (activeGroup.locked || !activeGroup.visible))
+        ) {
+          transformControls.detach();
+          return;
+        }
+        pivotPosition.set(0, 0, 0);
+        selectableObjects.forEach(({ runtime }) => {
+          pivotPosition.add(runtime.position);
+        });
+        pivotPosition.multiplyScalar(1 / selectableObjects.length);
+        if (transformControls.object !== selectionPivot || !draggingRef.current) {
+          selectionPivot.position.copy(pivotPosition);
+          selectionPivot.rotation.set(0, 0, 0);
+          selectionPivot.scale.set(1, 1, 1);
+          selectionPivot.updateMatrixWorld(true);
+          pivotMatrixPrevious.copy(selectionPivot.matrixWorld);
+          transformControls.attach(selectionPivot);
+        }
+        transformControls.setMode(state.transformMode);
+        transformControls.space = "world";
         return;
       }
       const activeObjectId = state.activeObjectId;
@@ -1191,6 +1336,35 @@ export function Viewport3D() {
       sceneRegistry.removeObject(objectId);
     };
 
+    const handleObjectsClone = (event: Event) => {
+      const detail = (event as CustomEvent<Array<{ objectId: string }>>).detail;
+      detail.forEach(({ objectId }) => {
+        const objectState = storeRef.current.objects.find((object) => object.id === objectId);
+        if (objectState) {
+          cloneRuntimeObject(objectState);
+        }
+      });
+      syncObjectBounds();
+      syncTransformControls();
+    };
+
+    const handleProjectRuntimeSync = () => {
+      const objectIds = new Set(storeRef.current.objects.map((object) => object.id));
+      sceneRegistry.getObjectIds().forEach((objectId) => {
+        if (!objectIds.has(objectId)) {
+          if (transformControls.object === sceneRegistry.getObject(objectId)) {
+            transformControls.detach();
+          }
+          skeletonRegistry.remove(objectId);
+          sceneRegistry.removeObject(objectId);
+        }
+      });
+      storeRef.current.objects.forEach(cloneRuntimeObject);
+      storeRef.current.objects.forEach(applyObjectState);
+      syncObjectBounds();
+      syncTransformControls();
+    };
+
     const handleCameraRemove = (event: Event) => {
       const cameraId = (event as CustomEvent<string>).detail;
       const rig = cameraRigs.get(cameraId);
@@ -1539,6 +1713,8 @@ export function Viewport3D() {
     window.addEventListener("glb-import-request", handleGlbImport);
     window.addEventListener("scene-object-create-request", handleSceneInsert);
     window.addEventListener("scene-object-remove-request", handleObjectRemove);
+    window.addEventListener("scene-objects-clone-request", handleObjectsClone);
+    window.addEventListener("project-runtime-sync-request", handleProjectRuntimeSync);
     window.addEventListener("scene-camera-remove-request", handleCameraRemove);
     window.addEventListener("camera-create-from-view-request", handleCameraCreateFromView);
     window.addEventListener("panorama-import-request", handlePanoramaImport);
@@ -1548,6 +1724,7 @@ export function Viewport3D() {
     window.addEventListener("beforeunload", handleBeforeUnload);
     renderer.domElement.addEventListener("pointerdown", handlePointerDown);
     renderer.domElement.addEventListener("pointerup", handleViewportSelection);
+    renderer.domElement.addEventListener("contextmenu", handleContextMenu);
     syncTransformControls();
     animate();
 
@@ -1558,6 +1735,8 @@ export function Viewport3D() {
       window.removeEventListener("glb-import-request", handleGlbImport);
       window.removeEventListener("scene-object-create-request", handleSceneInsert);
       window.removeEventListener("scene-object-remove-request", handleObjectRemove);
+      window.removeEventListener("scene-objects-clone-request", handleObjectsClone);
+      window.removeEventListener("project-runtime-sync-request", handleProjectRuntimeSync);
       window.removeEventListener("scene-camera-remove-request", handleCameraRemove);
       window.removeEventListener(
         "camera-create-from-view-request",
@@ -1570,6 +1749,7 @@ export function Viewport3D() {
       window.removeEventListener("beforeunload", handleBeforeUnload);
       renderer.domElement.removeEventListener("pointerdown", handlePointerDown);
       renderer.domElement.removeEventListener("pointerup", handleViewportSelection);
+      renderer.domElement.removeEventListener("contextmenu", handleContextMenu);
       transformControls.detach();
       transformControls.dispose();
       Array.from(objectBoundsHelpers.values()).forEach((helper) => {
@@ -1592,6 +1772,77 @@ export function Viewport3D() {
 
   return (
     <div className="viewport-stage" ref={containerRef}>
+      {contextMenu ? (
+        <div
+          className="viewport-context-menu"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+        >
+          <button
+            type="button"
+            onClick={() => {
+              useProjectStore.getState().copySelection();
+              setContextMenu(null);
+            }}
+          >
+            复制
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              useProjectStore.getState().pasteClipboard();
+              setContextMenu(null);
+            }}
+          >
+            粘贴
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              useProjectStore.getState().groupSelection();
+              setContextMenu(null);
+            }}
+          >
+            成组
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              useProjectStore.getState().ungroupSelection();
+              setContextMenu(null);
+            }}
+          >
+            解组
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              useProjectStore.getState().snapSelectionToGround();
+              setContextMenu(null);
+            }}
+          >
+            吸附到地面
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              useProjectStore.getState().alignSelection("x");
+              setContextMenu(null);
+            }}
+          >
+            X 对齐
+          </button>
+          <button
+            className="danger-action"
+            type="button"
+            onClick={() => {
+              useProjectStore.getState().removeSelection();
+              setContextMenu(null);
+            }}
+          >
+            删除
+          </button>
+        </div>
+      ) : null}
       <div className="viewport-hud">
         <div className="orientation-widget">
           <span className="orientation-origin" />

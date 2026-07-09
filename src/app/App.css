@@ -77,6 +77,20 @@ button {
   place-items: center;
 }
 
+.ghost-icon:disabled {
+  color: #5f5f5f;
+  cursor: not-allowed;
+}
+
+.top-feedback {
+  max-width: 180px;
+  overflow: hidden;
+  color: #b9d7ff;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .exit-button {
   padding: 0;
 }
@@ -254,6 +268,11 @@ h2 {
   gap: 4px;
 }
 
+.asset-group {
+  display: grid;
+  gap: 3px;
+}
+
 .asset-item {
   display: grid;
   grid-template-columns: 16px minmax(0, 1fr) 72px;
@@ -269,6 +288,16 @@ h2 {
   background: transparent;
   cursor: pointer;
   overflow: hidden;
+}
+
+.asset-item.group-item {
+  color: #f2f2f2;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.asset-item.is-child {
+  margin-left: 12px;
+  width: calc(100% - 12px);
 }
 
 .asset-item > svg {
@@ -307,6 +336,12 @@ h2 {
 .asset-item.is-active,
 .asset-item:hover {
   background: #2b2b2b;
+}
+
+.asset-empty {
+  padding: 10px 8px;
+  color: #777;
+  font-size: 12px;
 }
 
 .item-actions {
@@ -407,6 +442,36 @@ h2 {
   color: #fff;
   background: #303030;
   pointer-events: auto;
+}
+
+.viewport-context-menu {
+  position: fixed;
+  z-index: 30;
+  display: grid;
+  min-width: 144px;
+  border: 1px solid rgba(96, 96, 96, 0.9);
+  border-radius: 8px;
+  padding: 6px;
+  background: rgba(22, 22, 22, 0.96);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.35);
+}
+
+.viewport-context-menu button {
+  height: 28px;
+  border-radius: 6px;
+  padding: 0 10px;
+  color: #e8e8e8;
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+}
+
+.viewport-context-menu button:hover {
+  background: #333;
+}
+
+.viewport-context-menu .danger-action {
+  color: #ffaaa5;
 }
 
 .camera-view-badge {
@@ -2756,6 +2821,33 @@ h2 {
 
 .texture-input input {
   display: none;
+}
+
+.selection-action-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.selection-action-grid button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 32px;
+  border-radius: 7px;
+  padding: 0 8px;
+  color: #e4e4e4;
+  background: #242424;
+  cursor: pointer;
+}
+
+.selection-action-grid button:hover {
+  background: #343434;
+}
+
+.selection-action-grid .danger-action {
+  color: #ffb5b0;
 }
 
 @media (max-width: 1100px) {

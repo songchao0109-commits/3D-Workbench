@@ -32,6 +32,7 @@ import type {
   OutputFrame,
   ProjectState,
   SceneCamera,
+  SceneGroup,
   SceneObject,
   SnapshotRecord,
   TimelineKeyframeRef,
@@ -41,12 +42,29 @@ import type {
   WorldSettings,
 } from "../domain/projectTypes";
 
+type ProjectClipboard = {
+  objects: SceneObject[];
+  groups: SceneGroup[];
+  pasteCount: number;
+};
+
+type ProjectHistoryState = {
+  past: ProjectState[];
+  future: ProjectState[];
+  limit: number;
+};
+
 type ProjectStore = ProjectState & {
+  clipboard?: ProjectClipboard;
+  history: ProjectHistoryState;
   setActiveTool: (tool: ToolMode) => void;
   setTransformMode: (mode: TransformMode) => void;
   setOutputFrame: (frame: OutputFrame) => void;
   clearSelection: () => void;
   setActiveObject: (objectId?: string) => void;
+  toggleObjectSelection: (objectId: string) => void;
+  setSelectedObjects: (objectIds: string[], primaryObjectId?: string) => void;
+  setActiveGroup: (groupId?: string) => void;
   setActiveCamera: (cameraId: string) => void;
   setCameraPreviewActive: (active: boolean) => void;
   addCamera: (camera?: Partial<SceneCamera>) => void;
@@ -86,6 +104,24 @@ type ProjectStore = ProjectState & {
   toggleObjectLocked: (objectId: string) => void;
   toggleObjectBoundsVisible: (objectId: string) => void;
   removeObject: (objectId: string) => void;
+  copySelection: () => { ok: true } | { ok: false; message: string };
+  pasteClipboard: () => { ok: true; objectIds: string[] } | { ok: false; message: string };
+  duplicateSelection: () => { ok: true; objectIds: string[] } | { ok: false; message: string };
+  removeSelection: () => void;
+  setSelectionVisible: (visible: boolean) => void;
+  setSelectionLocked: (locked: boolean) => void;
+  groupSelection: () => { ok: true; groupId: string } | { ok: false; message: string };
+  ungroupSelection: () => void;
+  updateGroup: (groupId: string, updates: Partial<SceneGroup>) => void;
+  toggleGroupVisible: (groupId: string) => void;
+  toggleGroupLocked: (groupId: string) => void;
+  removeGroup: (groupId: string) => void;
+  snapSelectionToGround: () => void;
+  alignSelection: (axis: "x" | "y" | "z") => void;
+  distributeSelection: (axis: "x" | "z") => void;
+  undo: () => void;
+  redo: () => void;
+  replaceProject: (project: ProjectState) => void;
   updateObjectMaterial: (
     objectId: string,
     materialId: string,
@@ -386,15 +422,174 @@ function applyObjectDeltaToTargetPosition(
   return [transformedTarget.x, transformedTarget.y, transformedTarget.z];
 }
 
-export const useProjectStore = create<ProjectStore>((set) => ({
+const historyLimit = 50;
+
+function cloneProjectState(state: ProjectState): ProjectState {
+  return JSON.parse(
+    JSON.stringify({
+      schemaVersion: state.schemaVersion,
+      projectName: state.projectName,
+      activeShotId: state.activeShotId,
+      activeObjectId: state.activeObjectId,
+      activeGroupId: state.activeGroupId,
+      selectedObjectIds: state.selectedObjectIds,
+      selectedCameraId: state.selectedCameraId,
+      activeCameraId: state.activeCameraId,
+      activeTool: state.activeTool,
+      transformMode: state.transformMode,
+      cameraPreviewActive: state.cameraPreviewActive,
+      outputFrame: state.outputFrame,
+      worldSettings: state.worldSettings,
+      assets: state.assets,
+      objects: state.objects,
+      groups: state.groups,
+      cameras: state.cameras,
+      snapshots: state.snapshots,
+      animation: state.animation,
+      importError: state.importError,
+    }),
+  ) as ProjectState;
+}
+
+function withHistory(
+  state: ProjectStore,
+  updates: Partial<ProjectStore>,
+): Partial<ProjectStore> {
+  return {
+    ...updates,
+    history: {
+      past: [...state.history.past, cloneProjectState(state)].slice(-state.history.limit),
+      future: [],
+      limit: state.history.limit,
+    },
+  };
+}
+
+function restoreSnapshot(
+  snapshot: ProjectState,
+  history: ProjectHistoryState,
+): Partial<ProjectStore> {
+  return {
+    ...cloneProjectState(snapshot),
+    history,
+    clipboard: undefined,
+  };
+}
+
+function normalizeObjectIds(objectIds: string[], objects: SceneObject[]) {
+  const validIds = new Set(objects.map((object) => object.id));
+  return Array.from(new Set(objectIds.filter((id) => validIds.has(id))));
+}
+
+function nextObjectCopyName(name: string, existingNames: Set<string>) {
+  const baseName = `${name} 副本`;
+  if (!existingNames.has(baseName)) {
+    existingNames.add(baseName);
+    return baseName;
+  }
+  let index = 2;
+  while (existingNames.has(`${baseName} ${index}`)) {
+    index += 1;
+  }
+  const nextName = `${baseName} ${index}`;
+  existingNames.add(nextName);
+  return nextName;
+}
+
+function offsetObject(object: SceneObject, offset: number): SceneObject {
+  return {
+    ...object,
+    position: [
+      object.position[0] + offset,
+      object.position[1],
+      object.position[2] + offset,
+    ],
+    rig: object.rig
+      ? {
+          ...object.rig,
+          ikChains: object.rig.ikChains.map((chain) => ({
+            ...chain,
+            targetPosition: [
+              chain.targetPosition[0] + offset,
+              chain.targetPosition[1],
+              chain.targetPosition[2] + offset,
+            ],
+          })),
+        }
+      : object.rig,
+  };
+}
+
+function getSelectedObjectIds(state: ProjectStore) {
+  const selectedIds = state.selectedObjectIds.length
+    ? state.selectedObjectIds
+    : state.activeObjectId
+      ? [state.activeObjectId]
+      : [];
+  return normalizeObjectIds(selectedIds, state.objects);
+}
+
+function getObjectGroupId(groups: SceneGroup[], objectId: string) {
+  return groups.find((group) => group.objectIds.includes(objectId))?.id;
+}
+
+function getReferencedAssetIds(state: ProjectState, objects = state.objects) {
+  const ids = new Set<string>();
+  objects.forEach((object) => {
+    if (object.assetId) {
+      ids.add(object.assetId);
+    }
+    object.materialOverrides?.forEach((override) => {
+      if (override.textureAssetId) {
+        ids.add(override.textureAssetId);
+      }
+    });
+  });
+  if (state.worldSettings.panoramaSphere.assetId) {
+    ids.add(state.worldSettings.panoramaSphere.assetId);
+  }
+  return ids;
+}
+
+function removeUnreferencedAssets(
+  state: ProjectState,
+  objects: SceneObject[],
+  extraCandidateIds: Iterable<string>,
+) {
+  const referencedIds = getReferencedAssetIds(state, objects);
+  const candidateIds = new Set(extraCandidateIds);
+  const removableIds = new Set(
+    Array.from(candidateIds).filter((assetId) => !referencedIds.has(assetId)),
+  );
+  state.assets
+    .filter((asset) => removableIds.has(asset.id))
+    .forEach((asset) => URL.revokeObjectURL(asset.objectUrl));
+  return state.assets.filter((asset) => !removableIds.has(asset.id));
+}
+
+export const useProjectStore = create<ProjectStore>((set, get) => ({
   ...defaultProject,
+  clipboard: undefined,
+  history: {
+    past: [],
+    future: [],
+    limit: historyLimit,
+  },
   setActiveTool: (tool) => set({ activeTool: tool }),
   setTransformMode: (mode) => set({ transformMode: mode, activeTool: "move" }),
   setOutputFrame: (frame) => set({ outputFrame: frame, activeTool: "aspect" }),
-  clearSelection: () => set({ activeObjectId: undefined, selectedCameraId: undefined }),
+  clearSelection: () =>
+    set({
+      activeObjectId: undefined,
+      activeGroupId: undefined,
+      selectedObjectIds: [],
+      selectedCameraId: undefined,
+    }),
   setActiveObject: (objectId) =>
     set((state) => ({
       activeObjectId: objectId,
+      activeGroupId: undefined,
+      selectedObjectIds: objectId ? [objectId] : [],
       selectedCameraId: undefined,
       objects: state.objects.map((object) =>
         object.id === objectId && object.rig
@@ -408,11 +603,63 @@ export const useProjectStore = create<ProjectStore>((set) => ({
           : object,
       ),
     })),
+  toggleObjectSelection: (objectId) =>
+    set((state) => {
+      const exists = state.selectedObjectIds.includes(objectId);
+      const selectedObjectIds = exists
+        ? state.selectedObjectIds.filter((id) => id !== objectId)
+        : [...state.selectedObjectIds, objectId];
+      const normalizedIds = normalizeObjectIds(selectedObjectIds, state.objects);
+      return {
+        selectedObjectIds: normalizedIds,
+        activeObjectId: normalizedIds.at(-1),
+        activeGroupId: undefined,
+        selectedCameraId: undefined,
+        objects: state.objects.map((object) =>
+          object.id === objectId && object.rig
+            ? {
+                ...object,
+                rig: {
+                  ...object.rig,
+                  boneControlActive: false,
+                },
+              }
+            : object,
+        ),
+      };
+    }),
+  setSelectedObjects: (objectIds, primaryObjectId) =>
+    set((state) => {
+      const selectedObjectIds = normalizeObjectIds(objectIds, state.objects);
+      return {
+        selectedObjectIds,
+        activeObjectId:
+          primaryObjectId && selectedObjectIds.includes(primaryObjectId)
+            ? primaryObjectId
+            : selectedObjectIds.at(-1),
+        activeGroupId: undefined,
+        selectedCameraId: undefined,
+      };
+    }),
+  setActiveGroup: (groupId) =>
+    set((state) => {
+      const group = groupId
+        ? state.groups.find((item) => item.id === groupId)
+        : undefined;
+      return {
+        activeGroupId: group?.id,
+        selectedObjectIds: group ? [...group.objectIds] : [],
+        activeObjectId: group?.objectIds[0],
+        selectedCameraId: undefined,
+      };
+    }),
   setActiveCamera: (cameraId) =>
     set({
       activeCameraId: cameraId,
       selectedCameraId: cameraId,
       activeObjectId: undefined,
+      activeGroupId: undefined,
+      selectedObjectIds: [],
     }),
   setCameraPreviewActive: (active) => set({ cameraPreviewActive: active }),
   addCamera: (camera = {}) =>
@@ -435,26 +682,28 @@ export const useProjectStore = create<ProjectStore>((set) => ({
         locked: camera.locked ?? false,
       };
 
-      return {
+      return withHistory(state, {
         cameras: [...state.cameras, nextCamera],
         activeCameraId: id,
         selectedCameraId: id,
         activeObjectId: undefined,
-      };
+        activeGroupId: undefined,
+        selectedObjectIds: [],
+      });
     }),
   updateCamera: (cameraId, updates) =>
     set((state) => {
       const cameras = state.cameras.map((camera) =>
         camera.id === cameraId ? { ...camera, ...updates } : camera,
       );
-      return {
+      return withHistory(state, {
         cameras,
         animation: maybeAutoKeyCamera(state, cameraId, cameras),
-      };
+      });
     }),
   updateWorldSettings: (updates) =>
     set((state) => {
-      return {
+      return withHistory(state, {
         worldSettings: {
           ...state.worldSettings,
           ...updates,
@@ -475,7 +724,7 @@ export const useProjectStore = create<ProjectStore>((set) => ({
             ...updates.panoramaSphere,
           },
         },
-      };
+      });
     }),
   setWorldPanoramaAsset: (asset) =>
     set((state) => {
@@ -499,7 +748,7 @@ export const useProjectStore = create<ProjectStore>((set) => ({
             (item) => item.id !== state.worldSettings.panoramaSphere.assetId,
           );
 
-      return {
+      return withHistory(state, {
         assets: nextAssets,
         worldSettings: {
           ...state.worldSettings,
@@ -509,16 +758,16 @@ export const useProjectStore = create<ProjectStore>((set) => ({
             visible: asset ? true : false,
           },
         },
-      };
+      });
     }),
   toggleCameraVisible: (cameraId) =>
-    set((state) => ({
+    set((state) => withHistory(state, {
       cameras: state.cameras.map((camera) =>
         camera.id === cameraId ? { ...camera, visible: !camera.visible } : camera,
       ),
     })),
   toggleCameraLocked: (cameraId) =>
-    set((state) => ({
+    set((state) => withHistory(state, {
       cameras: state.cameras.map((camera) =>
         camera.id === cameraId ? { ...camera, locked: !camera.locked } : camera,
       ),
@@ -551,15 +800,17 @@ export const useProjectStore = create<ProjectStore>((set) => ({
         }),
       );
 
-      return {
+      return withHistory(state, {
         cameras: nextCameras,
         activeCameraId: nextActiveCameraId,
         selectedCameraId:
           state.selectedCameraId === cameraId ? undefined : state.selectedCameraId,
         activeObjectId: undefined,
+        activeGroupId: undefined,
+        selectedObjectIds: [],
         cameraPreviewActive:
           state.activeCameraId === cameraId ? false : state.cameraPreviewActive,
-      };
+      });
     }),
   setObjectRigMode: (objectId, mode) =>
     set((state) => ({
@@ -766,7 +1017,7 @@ export const useProjectStore = create<ProjectStore>((set) => ({
       ),
     })),
   updateObject: (objectId, updates) =>
-    set((state) => ({
+    set((state) => withHistory(state, {
       objects: state.objects.map((object) =>
         object.id === objectId ? { ...object, ...updates } : object,
       ),
@@ -807,10 +1058,10 @@ export const useProjectStore = create<ProjectStore>((set) => ({
           },
         };
       });
-      return {
+      return withHistory(state, {
         objects,
         animation: maybeAutoKeyObjectTransform(state, objectId, objects),
-      };
+      });
     }),
   updateObjectMetrics: (objectId, updates) =>
     set((state) => ({
@@ -819,19 +1070,19 @@ export const useProjectStore = create<ProjectStore>((set) => ({
       ),
     })),
   toggleObjectVisible: (objectId) =>
-    set((state) => ({
+    set((state) => withHistory(state, {
       objects: state.objects.map((object) =>
         object.id === objectId ? { ...object, visible: !object.visible } : object,
       ),
     })),
   toggleObjectLocked: (objectId) =>
-    set((state) => ({
+    set((state) => withHistory(state, {
       objects: state.objects.map((object) =>
         object.id === objectId ? { ...object, locked: !object.locked } : object,
       ),
     })),
   toggleObjectBoundsVisible: (objectId) =>
-    set((state) => ({
+    set((state) => withHistory(state, {
       objects: state.objects.map((object) =>
         object.id === objectId
           ? { ...object, boundsVisible: !object.boundsVisible }
@@ -850,23 +1101,460 @@ export const useProjectStore = create<ProjectStore>((set) => ({
           removedAssetIds.add(override.textureAssetId);
         }
       });
-      const removedAssets = state.assets.filter((asset) =>
-        removedAssetIds.has(asset.id),
-      );
-      removedAssets.forEach((asset) => URL.revokeObjectURL(asset.objectUrl));
       window.dispatchEvent(
         new CustomEvent("scene-object-remove-request", {
           detail: objectId,
         }),
       );
+      const objects = state.objects.filter((object) => object.id !== objectId);
+      const groups = state.groups
+        .map((group) => ({
+          ...group,
+          objectIds: group.objectIds.filter((id) => id !== objectId),
+        }))
+        .filter((group) => group.objectIds.length > 0);
 
-      return {
-        assets: state.assets.filter((asset) => !removedAssetIds.has(asset.id)),
-        objects: state.objects.filter((object) => object.id !== objectId),
+      return withHistory(state, {
+        assets: removeUnreferencedAssets(state, objects, removedAssetIds),
+        objects,
+        groups,
+        selectedObjectIds: state.selectedObjectIds.filter((id) => id !== objectId),
         activeObjectId:
           state.activeObjectId === objectId ? undefined : state.activeObjectId,
-      };
+        activeGroupId:
+          state.activeGroupId && groups.some((group) => group.id === state.activeGroupId)
+            ? state.activeGroupId
+            : undefined,
+      });
     }),
+  copySelection: () => {
+    const state = get();
+    const selectedIds = getSelectedObjectIds(state);
+    if (!selectedIds.length) {
+      return { ok: false as const, message: "请先选择要复制的对象" };
+    }
+    const selectedSet = new Set(selectedIds);
+    const groups = state.groups.filter((group) =>
+      group.objectIds.some((id) => selectedSet.has(id)),
+    );
+    set({
+      clipboard: {
+        objects: state.objects.filter((object) => selectedSet.has(object.id)),
+        groups,
+        pasteCount: 0,
+      },
+    });
+    return { ok: true as const };
+  },
+  pasteClipboard: () => {
+    const state = get();
+    const clipboard = state.clipboard;
+    if (!clipboard?.objects.length) {
+      return { ok: false as const, message: "剪贴板为空" };
+    }
+    const idMap = new Map<string, string>();
+    const existingNames = new Set(state.objects.map((object) => object.name));
+    const offset = 0.45 * (clipboard.pasteCount + 1);
+    const nextObjects = clipboard.objects.map((object) => {
+      const id = `object_${crypto.randomUUID()}`;
+      idMap.set(object.id, id);
+      return offsetObject(
+        {
+          ...object,
+          id,
+          sourceObjectId: object.sourceObjectId ?? object.id,
+          name: nextObjectCopyName(object.name, existingNames),
+          rig: object.rig
+            ? {
+                ...object.rig,
+                activeBoneId: object.rig.activeBoneId,
+                activeIkChainId: object.rig.activeIkChainId,
+                bones: object.rig.bones.map((bone) => ({ ...bone })),
+                ikChains: object.rig.ikChains.map((chain) => ({ ...chain })),
+              }
+            : object.rig,
+          materialOverrides: object.materialOverrides?.map((override) => ({
+            ...override,
+          })),
+        },
+        offset,
+      );
+    });
+    const selectedIds = nextObjects.map((object) => object.id);
+    const nextGroups = clipboard.groups
+      .map((group) => {
+        const objectIds = group.objectIds
+          .map((objectId) => idMap.get(objectId))
+          .filter((objectId): objectId is string => Boolean(objectId));
+        if (objectIds.length < 2) {
+          return undefined;
+        }
+        return {
+          ...group,
+          id: `group_${crypto.randomUUID()}`,
+          name: nextObjectCopyName(group.name, new Set(state.groups.map((item) => item.name))),
+          objectIds,
+        };
+      })
+      .filter((group): group is SceneGroup => Boolean(group));
+
+    set((current) =>
+      withHistory(current, {
+        objects: [...current.objects, ...nextObjects],
+        groups: [...current.groups, ...nextGroups],
+        selectedObjectIds: selectedIds,
+        activeObjectId: selectedIds.at(-1),
+        activeGroupId: nextGroups[0]?.id,
+        selectedCameraId: undefined,
+        clipboard: {
+          ...clipboard,
+          pasteCount: clipboard.pasteCount + 1,
+        },
+      }),
+    );
+    window.dispatchEvent(
+      new CustomEvent("scene-objects-clone-request", {
+        detail: nextObjects.map((object) => ({
+          objectId: object.id,
+          sourceObjectId: object.sourceObjectId,
+        })),
+      }),
+    );
+    return { ok: true as const, objectIds: selectedIds };
+  },
+  duplicateSelection: () => {
+    const copyResult = get().copySelection();
+    if (!copyResult.ok) {
+      return copyResult;
+    }
+    return get().pasteClipboard();
+  },
+  removeSelection: () =>
+    set((state) => {
+      const selectedIds = getSelectedObjectIds(state);
+      if (!selectedIds.length) {
+        return state;
+      }
+      const selectedSet = new Set(selectedIds);
+      const removedAssetIds = new Set<string>();
+      state.objects.forEach((object) => {
+        if (!selectedSet.has(object.id)) {
+          return;
+        }
+        if (object.assetId) {
+          removedAssetIds.add(object.assetId);
+        }
+        object.materialOverrides?.forEach((override) => {
+          if (override.textureAssetId) {
+            removedAssetIds.add(override.textureAssetId);
+          }
+        });
+        window.dispatchEvent(
+          new CustomEvent("scene-object-remove-request", {
+            detail: object.id,
+          }),
+        );
+      });
+      const objects = state.objects.filter((object) => !selectedSet.has(object.id));
+      const groups = state.groups
+        .map((group) => ({
+          ...group,
+          objectIds: group.objectIds.filter((id) => !selectedSet.has(id)),
+        }))
+        .filter((group) => group.objectIds.length > 0);
+      return withHistory(state, {
+        assets: removeUnreferencedAssets(state, objects, removedAssetIds),
+        objects,
+        groups,
+        selectedObjectIds: [],
+        activeObjectId: undefined,
+        activeGroupId: undefined,
+      });
+    }),
+  setSelectionVisible: (visible) =>
+    set((state) => {
+      const selectedSet = new Set(getSelectedObjectIds(state));
+      if (!selectedSet.size && !state.activeGroupId) {
+        return state;
+      }
+      const activeGroup = state.activeGroupId
+        ? state.groups.find((group) => group.id === state.activeGroupId)
+        : undefined;
+      activeGroup?.objectIds.forEach((id) => selectedSet.add(id));
+      return withHistory(state, {
+        objects: state.objects.map((object) =>
+          selectedSet.has(object.id) ? { ...object, visible } : object,
+        ),
+        groups: state.groups.map((group) =>
+          group.id === state.activeGroupId ? { ...group, visible } : group,
+        ),
+      });
+    }),
+  setSelectionLocked: (locked) =>
+    set((state) => {
+      const selectedSet = new Set(getSelectedObjectIds(state));
+      if (!selectedSet.size && !state.activeGroupId) {
+        return state;
+      }
+      const activeGroup = state.activeGroupId
+        ? state.groups.find((group) => group.id === state.activeGroupId)
+        : undefined;
+      activeGroup?.objectIds.forEach((id) => selectedSet.add(id));
+      return withHistory(state, {
+        objects: state.objects.map((object) =>
+          selectedSet.has(object.id) ? { ...object, locked } : object,
+        ),
+        groups: state.groups.map((group) =>
+          group.id === state.activeGroupId ? { ...group, locked } : group,
+        ),
+      });
+    }),
+  groupSelection: () => {
+    const state = get();
+    const selectedIds = getSelectedObjectIds(state);
+    if (selectedIds.length < 2) {
+      return { ok: false as const, message: "请至少选择两个对象再成组" };
+    }
+    const groupedId = selectedIds.find((id) => getObjectGroupId(state.groups, id));
+    if (groupedId) {
+      return { ok: false as const, message: "已在组内的对象请先解组" };
+    }
+    const groupId = `group_${crypto.randomUUID()}`;
+    const group: SceneGroup = {
+      id: groupId,
+      name: `组 ${state.groups.length + 1}`,
+      visible: true,
+      locked: false,
+      collapsed: false,
+      objectIds: selectedIds,
+      position: [0, 0, 0],
+      rotation: [0, 0, 0],
+      scale: [1, 1, 1],
+    };
+    set((current) =>
+      withHistory(current, {
+        groups: [...current.groups, group],
+        activeGroupId: groupId,
+        selectedObjectIds: selectedIds,
+        activeObjectId: selectedIds[0],
+        selectedCameraId: undefined,
+      }),
+    );
+    return { ok: true as const, groupId };
+  },
+  ungroupSelection: () =>
+    set((state) => {
+      const groupIds = new Set<string>();
+      if (state.activeGroupId) {
+        groupIds.add(state.activeGroupId);
+      }
+      state.selectedObjectIds.forEach((objectId) => {
+        const groupId = getObjectGroupId(state.groups, objectId);
+        if (groupId) {
+          groupIds.add(groupId);
+        }
+      });
+      if (!groupIds.size) {
+        return state;
+      }
+      return withHistory(state, {
+        groups: state.groups.filter((group) => !groupIds.has(group.id)),
+        activeGroupId: undefined,
+      });
+    }),
+  updateGroup: (groupId, updates) =>
+    set((state) =>
+      withHistory(state, {
+        groups: state.groups.map((group) =>
+          group.id === groupId ? { ...group, ...updates } : group,
+        ),
+      }),
+    ),
+  toggleGroupVisible: (groupId) =>
+    set((state) => {
+      const group = state.groups.find((item) => item.id === groupId);
+      if (!group) {
+        return state;
+      }
+      const visible = !group.visible;
+      const objectIds = new Set(group.objectIds);
+      return withHistory(state, {
+        groups: state.groups.map((item) =>
+          item.id === groupId ? { ...item, visible } : item,
+        ),
+        objects: state.objects.map((object) =>
+          objectIds.has(object.id) ? { ...object, visible } : object,
+        ),
+      });
+    }),
+  toggleGroupLocked: (groupId) =>
+    set((state) => {
+      const group = state.groups.find((item) => item.id === groupId);
+      if (!group) {
+        return state;
+      }
+      const locked = !group.locked;
+      const objectIds = new Set(group.objectIds);
+      return withHistory(state, {
+        groups: state.groups.map((item) =>
+          item.id === groupId ? { ...item, locked } : item,
+        ),
+        objects: state.objects.map((object) =>
+          objectIds.has(object.id) ? { ...object, locked } : object,
+        ),
+      });
+    }),
+  removeGroup: (groupId) =>
+    set((state) => {
+      const group = state.groups.find((item) => item.id === groupId);
+      if (!group) {
+        return state;
+      }
+      const objectIds = new Set(group.objectIds);
+      const removedAssetIds = new Set<string>();
+      state.objects.forEach((object) => {
+        if (!objectIds.has(object.id)) {
+          return;
+        }
+        if (object.assetId) {
+          removedAssetIds.add(object.assetId);
+        }
+        object.materialOverrides?.forEach((override) => {
+          if (override.textureAssetId) {
+            removedAssetIds.add(override.textureAssetId);
+          }
+        });
+        window.dispatchEvent(
+          new CustomEvent("scene-object-remove-request", {
+            detail: object.id,
+          }),
+        );
+      });
+      const objects = state.objects.filter((object) => !objectIds.has(object.id));
+      return withHistory(state, {
+        assets: removeUnreferencedAssets(state, objects, removedAssetIds),
+        objects,
+        groups: state.groups.filter((item) => item.id !== groupId),
+        selectedObjectIds: [],
+        activeObjectId: undefined,
+        activeGroupId: undefined,
+      });
+    }),
+  snapSelectionToGround: () =>
+    set((state) => {
+      const selectedSet = new Set(getSelectedObjectIds(state));
+      if (!selectedSet.size) {
+        return state;
+      }
+      const groundY = state.worldSettings.ground.y;
+      return withHistory(state, {
+        objects: state.objects.map((object) => {
+          if (!selectedSet.has(object.id) || object.locked) {
+            return object;
+          }
+          const height = object.actualDimensions?.[1] ?? 0;
+          return {
+            ...object,
+            position: [object.position[0], groundY + height / 2, object.position[2]],
+          };
+        }),
+      });
+    }),
+  alignSelection: (axis) =>
+    set((state) => {
+      const selectedSet = new Set(getSelectedObjectIds(state));
+      const selectedObjects = state.objects.filter(
+        (object) => selectedSet.has(object.id) && !object.locked,
+      );
+      if (selectedObjects.length < 2) {
+        return state;
+      }
+      const axisIndex = axis === "x" ? 0 : axis === "y" ? 1 : 2;
+      const target = selectedObjects[0].position[axisIndex];
+      return withHistory(state, {
+        objects: state.objects.map((object) =>
+          selectedSet.has(object.id) && !object.locked
+            ? {
+                ...object,
+                position: object.position.map((value, index) =>
+                  index === axisIndex ? target : value,
+                ) as Vec3,
+              }
+            : object,
+        ),
+      });
+    }),
+  distributeSelection: (axis) =>
+    set((state) => {
+      const selectedSet = new Set(getSelectedObjectIds(state));
+      const axisIndex = axis === "x" ? 0 : 2;
+      const selectedObjects = state.objects
+        .filter((object) => selectedSet.has(object.id) && !object.locked)
+        .sort((left, right) => left.position[axisIndex] - right.position[axisIndex]);
+      if (selectedObjects.length < 3) {
+        return state;
+      }
+      const first = selectedObjects[0].position[axisIndex];
+      const last = selectedObjects[selectedObjects.length - 1].position[axisIndex];
+      const step = (last - first) / (selectedObjects.length - 1);
+      const positions = new Map(
+        selectedObjects.map((object, index) => [object.id, first + step * index]),
+      );
+      return withHistory(state, {
+        objects: state.objects.map((object) => {
+          const nextValue = positions.get(object.id);
+          return nextValue === undefined
+            ? object
+            : {
+                ...object,
+                position: object.position.map((value, index) =>
+                  index === axisIndex ? nextValue : value,
+                ) as Vec3,
+              };
+        }),
+      });
+    }),
+  undo: () => {
+    const state = get();
+    const previous = state.history.past.at(-1);
+    if (!previous) {
+      return;
+    }
+    const history = {
+      past: state.history.past.slice(0, -1),
+      future: [cloneProjectState(state), ...state.history.future].slice(0, state.history.limit),
+      limit: state.history.limit,
+    };
+    set(restoreSnapshot(previous, history));
+    window.dispatchEvent(new CustomEvent("project-runtime-sync-request"));
+  },
+  redo: () => {
+    const state = get();
+    const next = state.history.future[0];
+    if (!next) {
+      return;
+    }
+    const history = {
+      past: [...state.history.past, cloneProjectState(state)].slice(-state.history.limit),
+      future: state.history.future.slice(1),
+      limit: state.history.limit,
+    };
+    set(restoreSnapshot(next, history));
+    window.dispatchEvent(new CustomEvent("project-runtime-sync-request"));
+  },
+  replaceProject: (project) =>
+    set((state) =>
+      withHistory(state, {
+        ...cloneProjectState({
+          ...defaultProject,
+          ...project,
+          selectedObjectIds: normalizeObjectIds(project.selectedObjectIds ?? [], project.objects),
+          groups: project.groups ?? [],
+          cameraPreviewActive: false,
+        }),
+        clipboard: undefined,
+      }),
+    ),
   updateObjectMaterial: (objectId, materialId, updates) =>
     set((state) => {
       const textureAssetsToRemove = new Set<string>();
@@ -903,31 +1591,30 @@ export const useProjectStore = create<ProjectStore>((set) => ({
         };
       });
 
-      const removedAssets = state.assets.filter((asset) =>
-        textureAssetsToRemove.has(asset.id),
-      );
-      removedAssets.forEach((asset) => URL.revokeObjectURL(asset.objectUrl));
-
-      return {
+      return withHistory(state, {
         objects,
-        assets: state.assets.filter((asset) => !textureAssetsToRemove.has(asset.id)),
-      };
+        assets: removeUnreferencedAssets(state, objects, textureAssetsToRemove),
+      });
     }),
   addAsset: (asset) =>
     set((state) => ({
       assets: [...state.assets, asset],
     })),
   addSceneObject: (object) =>
-    set((state) => ({
+    set((state) => withHistory(state, {
       objects: [...state.objects, object],
       activeObjectId: object.id,
+      activeGroupId: undefined,
+      selectedObjectIds: [object.id],
       selectedCameraId: undefined,
     })),
   addImportedModel: (asset, object) =>
-    set((state) => ({
+    set((state) => withHistory(state, {
       assets: [...state.assets, asset],
       objects: [...state.objects, object],
       activeObjectId: object.id,
+      activeGroupId: undefined,
+      selectedObjectIds: [object.id],
       selectedCameraId: undefined,
       importError: undefined,
     })),
