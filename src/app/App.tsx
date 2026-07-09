@@ -80,11 +80,6 @@ export function App() {
         store.undo();
         return;
       }
-      if (modifier && key === "y") {
-        event.preventDefault();
-        store.redo();
-        return;
-      }
       if (modifier && key === "c") {
         event.preventDefault();
         store.copySelection();
