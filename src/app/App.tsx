@@ -20,7 +20,7 @@ function isEditableTarget(target: EventTarget | null) {
 
 export function App() {
   const [timelineExpanded, setTimelineExpanded] = useState(false);
-  const [timelineHeight, setTimelineHeight] = useState(420);
+  const [timelineHeight, setTimelineHeight] = useState(380);
   const isPlaying = useProjectStore((state) => state.animation.isPlaying);
   const autosaveRestoreAttemptedRef = useRef(false);
 
@@ -82,12 +82,18 @@ export function App() {
       }
       if (modifier && key === "c") {
         event.preventDefault();
-        store.copySelection();
+        const result = store.copySelection();
+        if (!result.ok) {
+          emitAppFeedback(result.message);
+        }
         return;
       }
       if (modifier && key === "v") {
         event.preventDefault();
-        store.pasteClipboard();
+        const result = store.pasteClipboard();
+        if (!result.ok) {
+          emitAppFeedback(result.message);
+        }
         return;
       }
       if (event.key === "Backspace" || event.key === "Delete") {

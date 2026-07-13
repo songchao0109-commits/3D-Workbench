@@ -195,7 +195,7 @@ export type AnimationKeyframe = {
 export type AnimationCameraCut = {
   id: string;
   startTime: number;
-  endTime: number;
+  endTime?: number;
   cameraId: string;
   time?: number;
 };

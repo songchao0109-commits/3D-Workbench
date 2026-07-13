@@ -8,6 +8,7 @@ import {
   clampAnimationTime,
   clearAnimationInPoint,
   clearAnimationOutPoint,
+  hasCameraCutAtTime,
   moveCameraCuts,
   moveTimelineKeyframes,
   normalizeAnimationRangePoints,
@@ -56,6 +57,20 @@ type ProjectHistoryState = {
   limit: number;
 };
 
+type DuplicateSelectionResult =
+  | { ok: true; objectIds: string[]; sourceObjectIds: string[] }
+  | { ok: false; message: string };
+
+type AltDuplicatePreviewRestore = {
+  previewObjectIds: string[];
+  originalObjectIds: string[];
+  originalActiveGroupId?: string;
+  originalActiveObjectId?: string;
+  originalTransforms: Array<
+    Pick<SceneObject, "id" | "position" | "rotation" | "scale">
+  >;
+};
+
 type ProjectStore = ProjectState & {
   clipboard?: ProjectClipboard;
   history: ProjectHistoryState;
@@ -68,6 +83,8 @@ type ProjectStore = ProjectState & {
   clearSelection: () => void;
   setActiveObject: (objectId?: string) => void;
   toggleObjectSelection: (objectId: string) => void;
+  selectObjectOrGroup: (objectId: string) => void;
+  toggleSelectionUnit: (objectId: string) => void;
   setSelectedObjects: (objectIds: string[], primaryObjectId?: string) => void;
   setActiveGroup: (groupId?: string) => void;
   setActiveCamera: (cameraId: string) => void;
@@ -110,17 +127,21 @@ type ProjectStore = ProjectState & {
   toggleObjectBoundsVisible: (objectId: string) => void;
   removeObject: (objectId: string) => void;
   copySelection: () => { ok: true } | { ok: false; message: string };
-  pasteClipboard: () => { ok: true; objectIds: string[] } | { ok: false; message: string };
-  duplicateSelection: () => { ok: true; objectIds: string[] } | { ok: false; message: string };
+  pasteClipboard: (options?: { offset?: number }) => DuplicateSelectionResult;
+  duplicateSelection: (options?: { offset?: number }) => DuplicateSelectionResult;
+  cancelAltDuplicatePreview: (preview: AltDuplicatePreviewRestore) => void;
   removeSelection: () => void;
   setSelectionVisible: (visible: boolean) => void;
   setSelectionLocked: (locked: boolean) => void;
   groupSelection: () => { ok: true; groupId: string } | { ok: false; message: string };
   ungroupSelection: () => void;
   updateGroup: (groupId: string, updates: Partial<SceneGroup>) => void;
+  toggleGroupCollapsed: (groupId: string) => void;
   toggleGroupVisible: (groupId: string) => void;
   toggleGroupLocked: (groupId: string) => void;
   removeGroup: (groupId: string) => void;
+  moveObjectToGroup: (objectId: string, targetGroupId?: string) => void;
+  moveSelectionToGroup: (targetGroupId: string) => void;
   snapSelectionToGround: () => void;
   alignSelection: (
     mode:
@@ -228,6 +249,26 @@ function captureManualSelectionKeyframes(state: ProjectState) {
   const activeCamera = state.selectedCameraId
     ? state.cameras.find((camera) => camera.id === state.selectedCameraId)
     : undefined;
+  const activeGroup = state.activeGroupId
+    ? state.groups.find((group) => group.id === state.activeGroupId)
+    : undefined;
+
+  if (activeGroup) {
+    const groupObjects = activeGroup.objectIds
+      .map((objectId) => state.objects.find((object) => object.id === objectId))
+      .filter((object): object is SceneObject => Boolean(object));
+    if (!groupObjects.length) {
+      return { ok: false as const, message: "当前组没有可插帧对象" };
+    }
+    return {
+      ok: true as const,
+      bindings: groupObjects.reduce(
+        (bindings, object) =>
+          recordObjectTransformChannels(bindings, object, currentTime),
+        state.animation.bindings,
+      ),
+    };
+  }
 
   if (activeObject?.rig?.hasSkeleton && activeObject.rig.boneControlActive) {
     if (activeObject.rig.mode === "fk" && activeObject.rig.activeBoneId) {
@@ -295,18 +336,29 @@ function captureCameraCut(state: ProjectState) {
 
 function captureCameraCutForCamera(state: ProjectState, cameraId?: string) {
   if (!cameraId) {
-    return { ok: false as const, message: "请先选择一个机位，再添加机位序列" };
+    return { ok: false as const, message: "请先选择一个机位，再添加机位切换点" };
+  }
+  const currentTime = clampAnimationTime(
+    state.animation.currentTime,
+    state.animation.duration,
+    state.animation.fps,
+  );
+  if (
+    hasCameraCutAtTime(
+      state.animation.cameraCuts,
+      currentTime,
+      state.animation.duration,
+      state.animation.fps,
+    )
+  ) {
+    return { ok: false as const, message: "该时间点已有机位切换点" };
   }
   return {
     ok: true as const,
     cameraCuts: upsertAnimationCameraCut(
       state.animation.cameraCuts,
       cameraId,
-      clampAnimationTime(
-        state.animation.currentTime,
-        state.animation.duration,
-        state.animation.fps,
-      ),
+      currentTime,
       state.animation.duration,
       state.animation.fps,
     ),
@@ -318,7 +370,12 @@ function maybeAutoKeyObjectTransform(
   objectId: string,
   nextObjects: SceneObject[],
 ) {
-  if (!state.animation.autoKeyEnabled || state.activeObjectId !== objectId) {
+  const activeGroup = state.activeGroupId
+    ? state.groups.find((group) => group.id === state.activeGroupId)
+    : undefined;
+  const shouldAutoKey =
+    state.activeObjectId === objectId || Boolean(activeGroup?.objectIds.includes(objectId));
+  if (!state.animation.autoKeyEnabled || !shouldAutoKey) {
     return state.animation;
   }
   const activeObject = nextObjects.find((object) => object.id === objectId);
@@ -565,6 +622,33 @@ function getObjectGroupId(groups: SceneGroup[], objectId: string) {
   return groups.find((group) => group.objectIds.includes(objectId))?.id;
 }
 
+function getExactSelectedGroupId(groups: SceneGroup[], objectIds: string[]) {
+  const selectedIds = new Set(objectIds);
+  return groups.find(
+    (group) =>
+      group.objectIds.length === selectedIds.size &&
+      group.objectIds.every((objectId) => selectedIds.has(objectId)),
+  )?.id;
+}
+
+function getCopyContextError(state: ProjectStore) {
+  if (state.selectedCameraId) {
+    return "当前选中的是机位，不能复制对象";
+  }
+  const selectedObjectIds = getSelectedObjectIds(state);
+  if (
+    state.objects.some(
+      (object) => selectedObjectIds.includes(object.id) && object.rig?.boneControlActive,
+    )
+  ) {
+    return "调整骨骼或 IK 时不能复制对象";
+  }
+  if (!selectedObjectIds.length) {
+    return "请先选择要复制的对象";
+  }
+  return undefined;
+}
+
 function getRuntimeObjectBounds(objectId: string) {
   const runtimeObject = sceneRegistry.getObject(objectId);
   if (!runtimeObject) {
@@ -736,16 +820,98 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         ),
       };
     }),
+  selectObjectOrGroup: (objectId) =>
+    set((state) => {
+      const groupId = getObjectGroupId(state.groups, objectId);
+      const group = groupId ? state.groups.find((item) => item.id === groupId) : undefined;
+      const objects = state.objects.map((object) =>
+        object.id === objectId && object.rig
+          ? {
+              ...object,
+              rig: {
+                ...object.rig,
+                boneControlActive: false,
+              },
+            }
+          : object,
+      );
+      if (!group) {
+        return {
+          activeObjectId: objectId,
+          activeGroupId: undefined,
+          selectedObjectIds: [objectId],
+          selectedCameraId: undefined,
+          objects,
+        };
+      }
+      if (state.activeGroupId === group.id) {
+        return {
+          activeObjectId: objectId,
+          activeGroupId: undefined,
+          selectedObjectIds: [objectId],
+          selectedCameraId: undefined,
+          objects,
+        };
+      }
+      return {
+        activeObjectId: group.objectIds[0],
+        activeGroupId: group.id,
+        selectedObjectIds: [...group.objectIds],
+        selectedCameraId: undefined,
+        objects,
+      };
+    }),
+  toggleSelectionUnit: (objectId) =>
+    set((state) => {
+      const groupId = getObjectGroupId(state.groups, objectId);
+      const group = groupId ? state.groups.find((item) => item.id === groupId) : undefined;
+      const unitIds = group?.objectIds ?? [objectId];
+      const selectedIds = new Set(state.selectedObjectIds);
+      const unitIsSelected = unitIds.every((id) => selectedIds.has(id));
+      unitIds.forEach((id) => {
+        if (unitIsSelected) {
+          selectedIds.delete(id);
+        } else {
+          selectedIds.add(id);
+        }
+      });
+      const selectedObjectIds = normalizeObjectIds(Array.from(selectedIds), state.objects);
+      const activeGroupId = getExactSelectedGroupId(state.groups, selectedObjectIds);
+      const activeGroup = activeGroupId
+        ? state.groups.find((item) => item.id === activeGroupId)
+        : undefined;
+      return {
+        selectedObjectIds,
+        activeObjectId: activeGroup?.objectIds[0] ?? selectedObjectIds.at(-1),
+        activeGroupId,
+        selectedCameraId: undefined,
+        objects: state.objects.map((object) =>
+          object.id === objectId && object.rig
+            ? {
+                ...object,
+                rig: {
+                  ...object.rig,
+                  boneControlActive: false,
+                },
+              }
+            : object,
+        ),
+      };
+    }),
   setSelectedObjects: (objectIds, primaryObjectId) =>
     set((state) => {
       const selectedObjectIds = normalizeObjectIds(objectIds, state.objects);
+      const activeGroupId = getExactSelectedGroupId(state.groups, selectedObjectIds);
+      const activeGroup = activeGroupId
+        ? state.groups.find((item) => item.id === activeGroupId)
+        : undefined;
       return {
         selectedObjectIds,
-        activeObjectId:
-          primaryObjectId && selectedObjectIds.includes(primaryObjectId)
+        activeObjectId: activeGroup?.objectIds[0] ??
+          (primaryObjectId && selectedObjectIds.includes(primaryObjectId)
             ? primaryObjectId
-            : selectedObjectIds.at(-1),
-        activeGroupId: undefined,
+            : selectedObjectIds.at(-1)),
+        activeGroupId,
         selectedCameraId: undefined,
       };
     }),
@@ -759,6 +925,19 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         selectedObjectIds: group ? [...group.objectIds] : [],
         activeObjectId: group?.objectIds[0],
         selectedCameraId: undefined,
+        objects: group
+          ? state.objects.map((object) =>
+              group.objectIds.includes(object.id) && object.rig
+                ? {
+                    ...object,
+                    rig: {
+                      ...object.rig,
+                      boneControlActive: false,
+                    },
+                  }
+                : object,
+            )
+          : state.objects,
       };
     }),
   setActiveCamera: (cameraId) =>
@@ -1237,10 +1416,11 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     }),
   copySelection: () => {
     const state = get();
-    const selectedIds = getSelectedObjectIds(state);
-    if (!selectedIds.length) {
-      return { ok: false as const, message: "请先选择要复制的对象" };
+    const copyContextError = getCopyContextError(state);
+    if (copyContextError) {
+      return { ok: false as const, message: copyContextError };
     }
+    const selectedIds = getSelectedObjectIds(state);
     const selectedSet = new Set(selectedIds);
     const groups = state.groups.filter((group) =>
       group.objectIds.some((id) => selectedSet.has(id)),
@@ -1254,15 +1434,22 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     });
     return { ok: true as const };
   },
-  pasteClipboard: () => {
+  pasteClipboard: (options) => {
     const state = get();
+    const copyContextError = getCopyContextError(state);
+    if (copyContextError) {
+      return {
+        ok: false as const,
+        message: copyContextError,
+      };
+    }
     const clipboard = state.clipboard;
     if (!clipboard?.objects.length) {
       return { ok: false as const, message: "剪贴板为空" };
     }
     const idMap = new Map<string, string>();
     const existingNames = new Set(state.objects.map((object) => object.name));
-    const offset = 0.45 * (clipboard.pasteCount + 1);
+    const offset = options?.offset ?? 0.45 * (clipboard.pasteCount + 1);
     const nextObjects = clipboard.objects.map((object) => {
       const id = `object_${crypto.randomUUID()}`;
       idMap.set(object.id, id);
@@ -1328,15 +1515,84 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         })),
       }),
     );
-    return { ok: true as const, objectIds: selectedIds };
+    return {
+      ok: true as const,
+      objectIds: selectedIds,
+      sourceObjectIds: clipboard.objects.map((object) => object.id),
+    };
   },
-  duplicateSelection: () => {
+  duplicateSelection: (options) => {
     const copyResult = get().copySelection();
     if (!copyResult.ok) {
       return copyResult;
     }
-    return get().pasteClipboard();
+    return get().pasteClipboard(options);
   },
+  cancelAltDuplicatePreview: (preview) =>
+    set((state) => {
+      const previewObjectIds = new Set(preview.previewObjectIds);
+      const transformsById = new Map(
+        preview.originalTransforms.map((object) => [object.id, object]),
+      );
+      previewObjectIds.forEach((objectId) => {
+        window.dispatchEvent(
+          new CustomEvent("scene-object-remove-request", {
+            detail: objectId,
+          }),
+        );
+      });
+      const objects = state.objects
+        .filter((object) => !previewObjectIds.has(object.id))
+        .map((object) => {
+          const transform = transformsById.get(object.id);
+          return transform
+            ? {
+                ...object,
+                position: transform.position,
+                rotation: transform.rotation,
+                scale: transform.scale,
+              }
+            : object;
+        });
+      let animation = {
+        ...state.animation,
+        bindings: state.animation.bindings.filter(
+          (binding) =>
+            binding.targetType !== "object" || !previewObjectIds.has(binding.targetId),
+        ),
+      };
+      if (animation.autoKeyEnabled) {
+        preview.originalObjectIds.forEach((objectId) => {
+          const object = objects.find((item) => item.id === objectId);
+          if (!object) {
+            return;
+          }
+          animation = {
+            ...animation,
+            bindings: recordObjectTransformChannels(
+              animation.bindings,
+              object,
+              animation.currentTime,
+              animation.autoKeyMode,
+            ),
+          };
+        });
+      }
+      return withHistory(state, {
+        objects,
+        groups: state.groups
+          .map((group) => ({
+            ...group,
+            objectIds: group.objectIds.filter((objectId) => !previewObjectIds.has(objectId)),
+          }))
+          .filter((group) => group.objectIds.length > 0),
+        animation,
+        selectedObjectIds: preview.originalObjectIds,
+        activeObjectId: preview.originalActiveObjectId ?? preview.originalObjectIds.at(-1),
+        activeGroupId: preview.originalActiveGroupId,
+        selectedCameraId: undefined,
+      });
+    }),
   removeSelection: () => {
     const current = get();
     const selectedIds = getSelectedObjectIds(current);
@@ -1430,7 +1686,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     const state = get();
     const selectedIds = getSelectedObjectIds(state);
     if (selectedIds.length < 2) {
-      return { ok: false as const, message: "请至少选择两个对象再成组" };
+      return { ok: false as const, message: "请至少选择两个对象再打组" };
     }
     const groupedId = selectedIds.find((id) => getObjectGroupId(state.groups, id));
     if (groupedId) {
@@ -1480,13 +1736,23 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       });
     }),
   updateGroup: (groupId, updates) =>
-    set((state) =>
-      withHistory(state, {
+    set((state) => {
+      const nextUpdates =
+        typeof updates.name === "string"
+          ? { ...updates, name: updates.name.slice(0, 10) }
+          : updates;
+      return withHistory(state, {
         groups: state.groups.map((group) =>
-          group.id === groupId ? { ...group, ...updates } : group,
+          group.id === groupId ? { ...group, ...nextUpdates } : group,
         ),
-      }),
-    ),
+      });
+    }),
+  toggleGroupCollapsed: (groupId) =>
+    set((state) => ({
+      groups: state.groups.map((group) =>
+        group.id === groupId ? { ...group, collapsed: !group.collapsed } : group,
+      ),
+    })),
   toggleGroupVisible: (groupId) =>
     set((state) => {
       const group = state.groups.find((item) => item.id === groupId);
@@ -1554,6 +1820,65 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         groups: state.groups.filter((item) => item.id !== groupId),
         selectedObjectIds: [],
         activeObjectId: undefined,
+        activeGroupId: undefined,
+      });
+    }),
+  moveObjectToGroup: (objectId, targetGroupId) =>
+    set((state) => {
+      if (!state.objects.some((object) => object.id === objectId)) {
+        return state;
+      }
+      const sourceGroupId = getObjectGroupId(state.groups, objectId);
+      if (sourceGroupId === targetGroupId) {
+        return state;
+      }
+      if (targetGroupId && !state.groups.some((group) => group.id === targetGroupId)) {
+        emitAppFeedback("目标分组不存在");
+        return state;
+      }
+      const groups = state.groups
+        .map((group) => {
+          if (group.id === sourceGroupId) {
+            return {
+              ...group,
+              objectIds: group.objectIds.filter((id) => id !== objectId),
+            };
+          }
+          if (group.id === targetGroupId) {
+            return {
+              ...group,
+              objectIds: [...group.objectIds, objectId],
+            };
+          }
+          return group;
+        })
+        .filter((group) => group.objectIds.length > 0);
+      return withHistory(state, {
+        groups,
+        activeGroupId: getExactSelectedGroupId(groups, state.selectedObjectIds),
+      });
+    }),
+  moveSelectionToGroup: (targetGroupId) =>
+    set((state) => {
+      const selectedObjectIds = getSelectedObjectIds(state);
+      if (!selectedObjectIds.length) {
+        emitAppFeedback("请先选择对象");
+        return state;
+      }
+      if (!state.groups.some((group) => group.id === targetGroupId)) {
+        emitAppFeedback("目标分组不存在");
+        return state;
+      }
+      if (selectedObjectIds.some((objectId) => getObjectGroupId(state.groups, objectId))) {
+        emitAppFeedback("请先移出已有分组的对象");
+        return state;
+      }
+      return withHistory(state, {
+        groups: state.groups.map((group) =>
+          group.id === targetGroupId
+            ? { ...group, objectIds: [...group.objectIds, ...selectedObjectIds] }
+            : group,
+        ),
         activeGroupId: undefined,
       });
     }),

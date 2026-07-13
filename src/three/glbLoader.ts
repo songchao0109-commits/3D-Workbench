@@ -170,3 +170,73 @@ export function extractRigFromScene(scene: THREE.Object3D): ObjectRig | undefine
     ikChains,
   };
 }
+
+export function remapRigToScene(scene: THREE.Object3D, sourceRig: ObjectRig) {
+  const runtimeRig = extractRigFromScene(scene);
+  if (!runtimeRig) {
+    return undefined;
+  }
+
+  const sourceBonesByName = new Map<string, BoneRecord[]>();
+  sourceRig.bones.forEach((bone) => {
+    const bones = sourceBonesByName.get(bone.name) ?? [];
+    bones.push(bone);
+    sourceBonesByName.set(bone.name, bones);
+  });
+  const usedSourceBoneIds = new Set<string>();
+  const remappedBoneIds = new Map<string, string>();
+  const bones = runtimeRig.bones.map((runtimeBone, index) => {
+    const nameMatches = sourceBonesByName.get(runtimeBone.name) ?? [];
+    const sourceBone =
+      nameMatches.find((bone) => !usedSourceBoneIds.has(bone.id)) ??
+      sourceRig.bones[index];
+    if (!sourceBone) {
+      return runtimeBone;
+    }
+    usedSourceBoneIds.add(sourceBone.id);
+    remappedBoneIds.set(sourceBone.id, runtimeBone.id);
+    return {
+      ...runtimeBone,
+      position: sourceBone.position,
+      rotation: sourceBone.rotation,
+    };
+  });
+  const validBoneIds = new Set(bones.map((bone) => bone.id));
+  const mapBoneId = (boneId: string) => remappedBoneIds.get(boneId);
+  const ikChains = sourceRig.ikChains.flatMap((chain) => {
+    const rootBoneId = mapBoneId(chain.rootBoneId);
+    const effectorBoneId = mapBoneId(chain.effectorBoneId);
+    const linkBoneIds = chain.linkBoneIds
+      .map(mapBoneId)
+      .filter((boneId): boneId is string => Boolean(boneId));
+    if (
+      !rootBoneId ||
+      !effectorBoneId ||
+      !validBoneIds.has(rootBoneId) ||
+      !validBoneIds.has(effectorBoneId) ||
+      linkBoneIds.length !== chain.linkBoneIds.length
+    ) {
+      return [];
+    }
+    return [{ ...chain, rootBoneId, effectorBoneId, linkBoneIds }];
+  });
+  const mode = sourceRig.mode === "ik" && ikChains.length > 0 ? "ik" : "fk";
+  const activeBoneId = sourceRig.activeBoneId
+    ? mapBoneId(sourceRig.activeBoneId)
+    : undefined;
+  const activeIkChainId = ikChains.some((chain) => chain.id === sourceRig.activeIkChainId)
+    ? sourceRig.activeIkChainId
+    : ikChains[0]?.id;
+
+  return {
+    ...runtimeRig,
+    mode,
+    showSkeleton: sourceRig.showSkeleton,
+    activeBoneId: activeBoneId ?? runtimeRig.activeBoneId,
+    activeIkChainId,
+    boneControlActive:
+      mode === "ik" ? Boolean(activeIkChainId && sourceRig.boneControlActive) : false,
+    bones,
+    ikChains,
+  };
+}
