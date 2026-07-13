@@ -171,7 +171,10 @@ export function extractRigFromScene(scene: THREE.Object3D): ObjectRig | undefine
   };
 }
 
-export function remapRigToScene(scene: THREE.Object3D, sourceRig: ObjectRig) {
+export function remapRigToScene(
+  scene: THREE.Object3D,
+  sourceRig: ObjectRig,
+): ObjectRig | undefined {
   const runtimeRig = extractRigFromScene(scene);
   if (!runtimeRig) {
     return undefined;
@@ -228,7 +231,7 @@ export function remapRigToScene(scene: THREE.Object3D, sourceRig: ObjectRig) {
     ? sourceRig.activeIkChainId
     : ikChains[0]?.id;
 
-  return {
+  const nextRig = {
     ...runtimeRig,
     mode,
     showSkeleton: sourceRig.showSkeleton,
@@ -238,5 +241,7 @@ export function remapRigToScene(scene: THREE.Object3D, sourceRig: ObjectRig) {
       mode === "ik" ? Boolean(activeIkChainId && sourceRig.boneControlActive) : false,
     bones,
     ikChains,
-  };
+  } satisfies ObjectRig;
+
+  return nextRig;
 }
