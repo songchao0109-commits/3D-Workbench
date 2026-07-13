@@ -42,7 +42,7 @@ import {
 } from "../../three/sceneObjects";
 import { disposeObject3D, sceneRegistry } from "../../three/sceneRegistry";
 import { skeletonRegistry } from "../../three/skeletonRegistry";
-import type { SceneCamera, SceneObject, Vec3 } from "../../domain/projectTypes";
+import type { ObjectRig, SceneCamera, SceneObject, Vec3 } from "../../domain/projectTypes";
 
 type SceneInsertRequest =
   | { kind: "standin"; variant: "male" | "female" }
@@ -649,10 +649,10 @@ export function Viewport3D() {
           disposeObject3D(object);
           return;
         }
-        const rig = latestObjectState.rig?.hasSkeleton
+        const rig: ObjectRig | undefined = latestObjectState.rig?.hasSkeleton
           ? remapRigToScene(object, latestObjectState.rig)
           : latestObjectState.rig;
-        const resolvedObjectState = rig
+        const resolvedObjectState: SceneObject = rig
           ? { ...latestObjectState, rig }
           : latestObjectState;
         if (rig) {
