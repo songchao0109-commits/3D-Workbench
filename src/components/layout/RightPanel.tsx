@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { CameraInspector } from "../panels/CameraInspector";
 import { ObjectInspector } from "../panels/ObjectInspector";
-import { GroupInspector, SelectionInspector } from "../panels/SelectionInspector";
+import { SelectionInspector } from "../panels/SelectionInspector";
 import { SnapshotPanel } from "../panels/SnapshotPanel";
 import { WorldInspector } from "../panels/WorldInspector";
 import { useProjectStore } from "../../store/projectStore";
@@ -54,9 +54,7 @@ export function RightPanel() {
       <div className="right-panel-content">
         {activeTab === "snapshots" ? (
           <SnapshotPanel />
-        ) : activeGroup ? (
-          <GroupInspector group={activeGroup} />
-        ) : selectedObjectIds.length > 1 ? (
+        ) : activeGroup || selectedObjectIds.length > 1 ? (
           <SelectionInspector />
         ) : activeObject ? (
           <ObjectInspector object={activeObject} />

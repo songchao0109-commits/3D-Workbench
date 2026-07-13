@@ -7,7 +7,6 @@ import {
   CornerDownLeft,
   CornerDownRight,
   Download,
-  KeyRound,
   Pause,
   Play,
   Plus,
@@ -54,14 +53,22 @@ type VisibleTimelineNode = {
   node: TimelineTreeNode;
 };
 
-type TimelineCameraClip = {
+type TimelineCameraMarker = {
   id: string;
   cameraId: string;
   label: string;
-  startTime: number;
-  endTime: number;
+  time: number;
   refs: TimelineKeyframeRef[];
 };
+
+type TimelineCameraMarkerPlacement = TimelineCameraMarker & {
+  lane: number;
+  groupSize: number;
+};
+
+const OPEN_TIMELINE_MIN_SECONDS = 15;
+const OPEN_TIMELINE_LOOKAHEAD_SECONDS = 15;
+const CAMERA_MARKER_LABEL_COLLISION_PX = 88;
 
 function buildDisplayKeyframes(
   items: Array<{ id: string; time: number; refs: TimelineKeyframeRef[]; label?: string }>,
@@ -104,8 +111,47 @@ function formatTimecode(time: number, fps: number) {
     .padStart(2, "0")}`;
 }
 
+function formatTimelineTick(seconds: number) {
+  const safeSeconds = Math.max(0, Math.round(seconds));
+  const minutes = Math.floor(safeSeconds / 60);
+  const remainingSeconds = safeSeconds % 60;
+  return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`;
+}
+
 function formatSeconds(seconds: number) {
   return Number(seconds.toFixed(2)).toString();
+}
+
+function InsertKeyframeIcon({ size = 16 }: { size?: number }) {
+  return (
+    <svg
+      aria-hidden="true"
+      fill="none"
+      height={size}
+      viewBox="0 0 24 24"
+      width={size}
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <rect
+        height="15"
+        rx="4"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="2.25"
+        transform="rotate(45 12 12)"
+        width="15"
+        x="4.5"
+        y="4.5"
+      />
+      <path
+        d="M12 7.6v8.8M7.6 12h8.8"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="2.25"
+      />
+    </svg>
+  );
 }
 
 function isEditableTarget(target: EventTarget | null) {
@@ -171,11 +217,14 @@ export function TimelinePanel({
   const projectName = useProjectStore((state) => state.projectName);
   const animation = useProjectStore((state) => state.animation);
   const activeObjectId = useProjectStore((state) => state.activeObjectId);
+  const activeGroupId = useProjectStore((state) => state.activeGroupId);
   const selectedCameraId = useProjectStore((state) => state.selectedCameraId);
   const objects = useProjectStore((state) => state.objects);
+  const groups = useProjectStore((state) => state.groups);
   const cameras = useProjectStore((state) => state.cameras);
   const setAnimationTime = useProjectStore((state) => state.setAnimationTime);
   const setAnimationFps = useProjectStore((state) => state.setAnimationFps);
+  const setAnimationDuration = useProjectStore((state) => state.setAnimationDuration);
   const setAnimationInPoint = useProjectStore((state) => state.setAnimationInPoint);
   const setAnimationOutPoint = useProjectStore((state) => state.setAnimationOutPoint);
   const clearAnimationInPoint = useProjectStore((state) => state.clearAnimationInPoint);
@@ -203,7 +252,6 @@ export function TimelinePanel({
   const moveSelectedTimelineKeyframe = useProjectStore(
     (state) => state.moveSelectedTimelineKeyframe,
   );
-  const resizeCameraCutClip = useProjectStore((state) => state.resizeCameraCutClip);
   const beginHistoryDraft = useProjectStore((state) => state.beginHistoryDraft);
   const commitHistoryDraft = useProjectStore((state) => state.commitHistoryDraft);
   const [feedback, setFeedback] = useState<string>("");
@@ -219,12 +267,7 @@ export function TimelinePanel({
     time: number;
     laneLeft: number;
     laneWidth: number;
-  } | null>(null);
-  const [resizingCameraClip, setResizingCameraClip] = useState<{
-    cutId: string;
-    edge: "start" | "end";
-    laneLeft: number;
-    laneWidth: number;
+    pointerOffsetX: number;
   } | null>(null);
   const [seekingTimeline, setSeekingTimeline] = useState(false);
   const [draggingRangePoint, setDraggingRangePoint] = useState<{
@@ -266,6 +309,24 @@ export function TimelinePanel({
   const activeCamera = selectedCameraId
     ? cameras.find((camera) => camera.id === selectedCameraId)
     : undefined;
+  const activeGroup = activeGroupId
+    ? groups.find((group) => group.id === activeGroupId)
+    : undefined;
+
+  useEffect(() => {
+    if (!activeGroup) {
+      return;
+    }
+    setExpandedNodes((current) => {
+      const next = {
+        ...current,
+        summary: true,
+        "group:object": true,
+        [`scene-group:${activeGroup.id}`]: true,
+      };
+      return Object.keys(next).every((key) => next[key] === current[key]) ? current : next;
+    });
+  }, [activeGroup]);
   const objectMap = useMemo(
     () => new Map(objects.map((object) => [object.id, object])),
     [objects],
@@ -275,18 +336,16 @@ export function TimelinePanel({
     [cameras],
   );
 
-  const cameraCutClips = useMemo<TimelineCameraClip[]>(
+  const cameraCutMarkers = useMemo<TimelineCameraMarker[]>(
     () =>
       animation.cameraCuts
         .map((cut) => {
-          const startTime = cut.startTime ?? cut.time ?? 0;
-          const endTime = cut.endTime ?? animation.duration;
+          const time = cut.startTime ?? cut.time ?? 0;
           return {
             id: `camera-cut:${cut.id}`,
             cameraId: cut.cameraId,
             label: cameraMap.get(cut.cameraId)?.name ?? "未知机位",
-            startTime,
-            endTime,
+            time,
             refs: [
               {
                 kind: "cameraCut" as const,
@@ -295,8 +354,8 @@ export function TimelinePanel({
             ],
           };
         })
-        .sort((left, right) => left.startTime - right.startTime),
-    [animation.cameraCuts, animation.duration, cameraMap],
+        .sort((left, right) => left.time - right.time),
+    [animation.cameraCuts, cameraMap],
   );
 
   const bindingRows = useMemo(
@@ -367,8 +426,7 @@ export function TimelinePanel({
   const timelineTree = useMemo<TimelineTreeNode[]>(() => {
     const objectBindings = bindingRows.filter((binding) => binding.targetType === "object");
     const cameraBindings = bindingRows.filter((binding) => binding.targetType === "camera");
-
-    const objectChildren: TimelineTreeNode[] = objectBindings.map((binding) => ({
+    const toBindingNode = (binding: (typeof bindingRows)[number]): TimelineTreeNode => ({
       id: binding.id,
       label: binding.label,
       subtitle: `${binding.channelRows.length} 个通道`,
@@ -381,40 +439,45 @@ export function TimelinePanel({
         kind: "channel",
         keyframes: row.keyframes,
       })),
-    }));
+    });
+    const groupedObjectIds = new Set(groups.flatMap((group) => group.objectIds));
+    const groupChildren = groups.flatMap((group) => {
+      const memberBindings = objectBindings.filter((binding) =>
+        group.objectIds.includes(binding.targetId),
+      );
+      if (!memberBindings.length) {
+        return [];
+      }
+      return [
+        {
+          id: `scene-group:${group.id}`,
+          label: group.name,
+          subtitle: `${memberBindings.length} 个成员轨道`,
+          kind: "group" as const,
+          keyframes: buildDisplayKeyframes(
+            memberBindings.flatMap((binding) => binding.keyframes),
+          ),
+          children: memberBindings.map(toBindingNode),
+        },
+      ];
+    });
+    const objectChildren: TimelineTreeNode[] = [
+      ...groupChildren,
+      ...objectBindings
+        .filter((binding) => !groupedObjectIds.has(binding.targetId))
+        .map(toBindingNode),
+    ];
+    const cameraChildren: TimelineTreeNode[] = cameraBindings.map(toBindingNode);
 
-    const cameraChildren: TimelineTreeNode[] = cameraBindings.map((binding) => ({
-      id: binding.id,
-      label: binding.label,
-      subtitle: `${binding.channelRows.length} 个通道`,
-      kind: "binding",
-      keyframes: binding.keyframes,
-      children: binding.channelRows.map((row) => ({
-        id: `${row.bindingId}:${row.channel.id}`,
-        label: row.label,
-        subtitle: row.subtitle,
-        kind: "channel",
-        keyframes: row.keyframes,
-      })),
-    }));
-
-    return [
-      {
-        id: "summary",
-        label: "汇总",
-        subtitle: "默认展示全局关键帧",
+      return [
+        {
+          id: "summary",
+          label: "汇总",
+          subtitle: "默认展示全局关键帧",
         kind: "summary",
         keyframes: buildDisplayKeyframes(bindingRows.flatMap((binding) => binding.keyframes)),
         laneClassName: "timeline-track-lane timeline-summary-lane",
         children: [
-          {
-            id: "group:object",
-            label: "对象",
-            subtitle: objectChildren.length ? `${objectChildren.length} 个对象轨道` : "暂无对象轨道",
-            kind: "group",
-            keyframes: buildDisplayKeyframes(objectChildren.flatMap((item) => item.keyframes)),
-            children: objectChildren,
-          },
           {
             id: "group:camera",
             label: "机位",
@@ -423,12 +486,23 @@ export function TimelinePanel({
             keyframes: buildDisplayKeyframes(cameraChildren.flatMap((item) => item.keyframes)),
             children: cameraChildren,
           },
+          {
+            id: "group:object",
+            label: "对象",
+            subtitle: objectChildren.length ? `${objectChildren.length} 个对象轨道` : "暂无对象轨道",
+            kind: "group",
+            keyframes: buildDisplayKeyframes(objectChildren.flatMap((item) => item.keyframes)),
+            children: objectChildren,
+          },
         ],
       },
     ];
-  }, [bindingRows]);
+  }, [bindingRows, groups]);
 
   const selectionLabel = useMemo(() => {
+    if (activeGroup) {
+      return `当前组：${activeGroup.name}`;
+    }
     if (activeObject?.rig?.hasSkeleton && activeObject.rig.boneControlActive) {
       if (activeObject.rig.mode === "fk" && activeObject.rig.activeBoneId) {
         const bone = activeObject.rig.bones.find(
@@ -452,7 +526,7 @@ export function TimelinePanel({
       return `当前机位：${activeCamera.name}`;
     }
     return "请选择对象、机位或骨骼控制节点";
-  }, [activeCamera, activeObject]);
+  }, [activeCamera, activeGroup, activeObject]);
 
   const ioRange = useMemo(() => {
     const startTime = animation.inPointTime ?? 0;
@@ -466,6 +540,46 @@ export function TimelinePanel({
         animation.inPointTime !== undefined || animation.outPointTime !== undefined,
     };
   }, [animation.duration, animation.inPointTime, animation.outPointTime]);
+
+  const timelineExtentSeconds = useMemo(() => {
+    const furthestKeyframeTime = bindingRows.reduce((maxTime, binding) => {
+      const bindingMax = binding.keyframes.reduce(
+        (rowMax, keyframe) => Math.max(rowMax, keyframe.time),
+        0,
+      );
+      return Math.max(maxTime, bindingMax);
+    }, 0);
+    const furthestCameraCutTime = cameraCutMarkers.reduce(
+      (maxTime, marker) => Math.max(maxTime, marker.time),
+      0,
+    );
+    const furthestExplicitTime = Math.max(
+      animation.currentTime,
+      animation.inPointTime ?? 0,
+      animation.outPointTime ?? 0,
+      furthestKeyframeTime,
+      furthestCameraCutTime,
+    );
+    return Math.max(
+      OPEN_TIMELINE_MIN_SECONDS,
+      animation.duration + OPEN_TIMELINE_LOOKAHEAD_SECONDS,
+      furthestExplicitTime + OPEN_TIMELINE_LOOKAHEAD_SECONDS,
+    );
+  }, [
+    animation.currentTime,
+    animation.duration,
+    animation.inPointTime,
+    animation.outPointTime,
+    bindingRows,
+    cameraCutMarkers,
+  ]);
+
+  const ensureTimelineCoversTime = useCallback((time: number) => {
+    if (!Number.isFinite(time) || time <= animation.duration) {
+      return;
+    }
+    setAnimationDuration(time + OPEN_TIMELINE_LOOKAHEAD_SECONDS);
+  }, [animation.duration, setAnimationDuration]);
 
   const collectKeyframeIdsAtTime = (
     targetType: "object" | "camera",
@@ -484,10 +598,24 @@ export function TimelinePanel({
       );
   };
 
+  const collectGroupKeyframeIdsAtTime = (groupId: string, time: number) => {
+    const group = groups.find((item) => item.id === groupId);
+    if (!group) {
+      return [];
+    }
+    return group.objectIds.flatMap((objectId) =>
+      collectKeyframeIdsAtTime("object", objectId, time),
+    );
+  };
+
   const handleCapture = () => {
     const result = captureCurrentKeyframe();
     if (result.ok) {
-      if (activeObject) {
+      if (activeGroup) {
+        setLastEditedKeyframeIds(
+          collectGroupKeyframeIdsAtTime(activeGroup.id, animation.currentTime),
+        );
+      } else if (activeObject) {
         setLastEditedKeyframeIds(
           collectKeyframeIdsAtTime("object", activeObject.id, animation.currentTime),
         );
@@ -503,7 +631,7 @@ export function TimelinePanel({
   const handleCameraCutCapture = (cameraId?: string) => {
     const result = cameraId ? addCameraCutAtTime(cameraId) : addCurrentCameraCut();
     setCameraMenuOpen(false);
-    setFeedback(result.ok ? "已添加机位序列" : result.message);
+    setFeedback(result.ok ? "已添加机位切换点" : result.message);
   };
 
   const handleSetInPoint = () => {
@@ -539,7 +667,8 @@ export function TimelinePanel({
     laneWidth: number,
   ) => {
     const relativeX = Math.min(laneWidth, Math.max(0, clientX - laneLeft));
-    const nextTime = (relativeX / Math.max(laneWidth, 1)) * animation.duration;
+    const nextTime = (relativeX / Math.max(laneWidth, 1)) * timelineExtentSeconds;
+    ensureTimelineCoversTime(nextTime);
     if (type === "in") {
       setAnimationInPoint(nextTime);
       setFeedback(`入点：第 ${formatFrameLabel(nextTime, animation.fps)} 帧`);
@@ -547,7 +676,13 @@ export function TimelinePanel({
     }
     setAnimationOutPoint(nextTime);
     setFeedback(`出点：第 ${formatFrameLabel(nextTime, animation.fps)} 帧`);
-  }, [animation.duration, animation.fps, setAnimationInPoint, setAnimationOutPoint]);
+  }, [
+    animation.fps,
+    ensureTimelineCoversTime,
+    setAnimationInPoint,
+    setAnimationOutPoint,
+    timelineExtentSeconds,
+  ]);
 
   const handleRangePointPointerDown = (
     event: ReactPointerEvent<HTMLButtonElement>,
@@ -622,6 +757,8 @@ export function TimelinePanel({
         ? {
             ...current,
             summary: true,
+            "group:camera": true,
+            "group:object": true,
           }
         : current,
     );
@@ -671,6 +808,12 @@ export function TimelinePanel({
       return;
     }
     previousBindingsRef.current = animation.bindings;
+    if (activeGroup) {
+      setLastEditedKeyframeIds(
+        collectGroupKeyframeIdsAtTime(activeGroup.id, animation.currentTime),
+      );
+      return;
+    }
     if (activeObject) {
       setLastEditedKeyframeIds(
         collectKeyframeIdsAtTime("object", activeObject.id, animation.currentTime),
@@ -682,7 +825,15 @@ export function TimelinePanel({
         collectKeyframeIdsAtTime("camera", activeCamera.id, animation.currentTime),
       );
     }
-  }, [activeCamera, activeObject, animation.bindings, animation.currentTime, bindingRows]);
+  }, [
+    activeCamera,
+    activeGroup,
+    activeObject,
+    animation.bindings,
+    animation.currentTime,
+    bindingRows,
+    groups,
+  ]);
 
   useEffect(() => {
     if (!draggingKeyframe) {
@@ -692,13 +843,17 @@ export function TimelinePanel({
     const handlePointerMove = (event: PointerEvent) => {
       const relativeX = Math.min(
         draggingKeyframe.laneWidth,
-        Math.max(0, event.clientX - draggingKeyframe.laneLeft),
+        Math.max(
+          0,
+          event.clientX - draggingKeyframe.laneLeft - draggingKeyframe.pointerOffsetX,
+        ),
       );
       const nextTime =
-        (relativeX / Math.max(draggingKeyframe.laneWidth, 1)) * animation.duration;
+        (relativeX / Math.max(draggingKeyframe.laneWidth, 1)) * timelineExtentSeconds;
       if (Math.abs(nextTime - draggingKeyframe.time) < 0.0001) {
         return;
       }
+      ensureTimelineCoversTime(nextTime);
       moveSelectedTimelineKeyframe(draggingKeyframe.refs, nextTime);
       setLastEditedKeyframeIds([draggingKeyframe.id]);
       setSelectedKeyframe((current) =>
@@ -725,47 +880,11 @@ export function TimelinePanel({
       window.removeEventListener("pointerup", handlePointerUp);
     };
   }, [
-    animation.duration,
     commitHistoryDraft,
     draggingKeyframe,
+    ensureTimelineCoversTime,
     moveSelectedTimelineKeyframe,
-  ]);
-
-  useEffect(() => {
-    if (!resizingCameraClip) {
-      return undefined;
-    }
-
-    const handlePointerMove = (event: PointerEvent) => {
-      const relativeX = Math.min(
-        resizingCameraClip.laneWidth,
-        Math.max(0, event.clientX - resizingCameraClip.laneLeft),
-      );
-      const nextTime =
-        (relativeX / Math.max(resizingCameraClip.laneWidth, 1)) * animation.duration;
-      resizeCameraCutClip(
-        resizingCameraClip.cutId,
-        resizingCameraClip.edge,
-        nextTime,
-      );
-    };
-
-    const handlePointerUp = () => {
-      commitHistoryDraft();
-      setResizingCameraClip(null);
-    };
-
-    window.addEventListener("pointermove", handlePointerMove);
-    window.addEventListener("pointerup", handlePointerUp);
-    return () => {
-      window.removeEventListener("pointermove", handlePointerMove);
-      window.removeEventListener("pointerup", handlePointerUp);
-    };
-  }, [
-    animation.duration,
-    commitHistoryDraft,
-    resizingCameraClip,
-    resizeCameraCutClip,
+    timelineExtentSeconds,
   ]);
 
   useEffect(() => {
@@ -801,8 +920,10 @@ export function TimelinePanel({
     laneWidth: number,
   ) => {
     const relativeX = Math.min(laneWidth, Math.max(0, clientX - laneLeft));
-    setAnimationTime((relativeX / Math.max(laneWidth, 1)) * animation.duration);
-  }, [animation.duration, setAnimationTime]);
+    const nextTime = (relativeX / Math.max(laneWidth, 1)) * timelineExtentSeconds;
+    ensureTimelineCoversTime(nextTime);
+    setAnimationTime(nextTime);
+  }, [ensureTimelineCoversTime, setAnimationTime, timelineExtentSeconds]);
 
   const scrollTimelinePaneForPointer = useCallback((clientX: number) => {
     const scrollPane = timelineScrollRef.current;
@@ -945,22 +1066,55 @@ export function TimelinePanel({
   };
 
   const rulerTicks = useMemo(() => {
-    const totalFrames = Math.max(1, Math.round(animation.duration * animation.fps));
-    const step = Math.max(1, Math.ceil(totalFrames / 12));
-    return Array.from({ length: Math.floor(totalFrames / step) + 1 }).map((_, index) => {
-      const frame = Math.min(totalFrames, index * step);
+    const duration = Math.max(1, timelineExtentSeconds);
+    const targetTickCount = 7;
+    const candidates = [1, 2, 5, 10, 15, 30, 60, 120];
+    const step =
+      candidates.find((candidate) => duration / candidate <= targetTickCount) ??
+      candidates[candidates.length - 1];
+    const tickCount = Math.floor(duration / step) + 1;
+    const ticks = Array.from({ length: tickCount }).map((_, index) => {
+      const seconds = Math.min(duration, index * step);
       return {
-        key: `frame-${frame}`,
-        label: frame.toString(),
-        left: `${(frame / totalFrames) * 100}%`,
+        key: `time-${seconds}`,
+        label: formatTimelineTick(seconds),
+        left: `${(seconds / duration) * 100}%`,
       };
     });
-  }, [animation.duration, animation.fps]);
+    return ticks;
+  }, [timelineExtentSeconds]);
 
   const timelineContentWidth = useMemo(
-    () => Math.min(12000, Math.max(960, Math.round(animation.duration * animation.fps * 12))),
-    [animation.duration, animation.fps],
+    () => Math.min(12000, Math.max(960, Math.round(timelineExtentSeconds * animation.fps * 12))),
+    [animation.fps, timelineExtentSeconds],
   );
+
+  const cameraMarkerPlacements = useMemo<TimelineCameraMarkerPlacement[]>(() => {
+    const groups: Array<Array<{ marker: TimelineCameraMarker; x: number }>> = [];
+    cameraCutMarkers.forEach((marker) => {
+      const x =
+        (marker.time / Math.max(timelineExtentSeconds, 0.001)) * timelineContentWidth;
+      const lastGroup = groups.at(-1);
+      const lastMarker = lastGroup?.at(-1);
+      if (
+        lastGroup &&
+        lastMarker &&
+        Math.abs(x - lastMarker.x) < CAMERA_MARKER_LABEL_COLLISION_PX
+      ) {
+        lastGroup.push({ marker, x });
+        return;
+      }
+      groups.push([{ marker, x }]);
+    });
+
+    return groups.flatMap((group) =>
+      group.map(({ marker }, lane) => ({
+        ...marker,
+        lane,
+        groupSize: group.length,
+      })),
+    );
+  }, [cameraCutMarkers, timelineContentWidth, timelineExtentSeconds]);
 
   const timelineStopTimes = useMemo(() => {
     const times = new Set<number>();
@@ -970,16 +1124,19 @@ export function TimelinePanel({
         row.keyframes.forEach((keyframe) => times.add(Number(keyframe.time.toFixed(4))));
       });
     });
-    cameraCutClips.forEach((clip) => {
-      times.add(Number(clip.startTime.toFixed(4)));
-      times.add(Number(clip.endTime.toFixed(4)));
+    cameraCutMarkers.forEach((marker) => {
+      times.add(Number(marker.time.toFixed(4)));
     });
     return Array.from(times).sort((left, right) => left - right);
-  }, [bindingRows, cameraCutClips]);
+  }, [bindingRows, cameraCutMarkers]);
 
   const visibleTimelineNodes = useMemo<VisibleTimelineNode[]>(() => {
     const rows: VisibleTimelineNode[] = [];
     const appendNode = (node: TimelineTreeNode, depth = 0) => {
+      if (node.kind === "summary" && depth === 0) {
+        node.children?.forEach((child) => appendNode(child, 0));
+        return;
+      }
       rows.push({ node, depth });
       if (!node.children?.length || !expandedNodes[node.id]) {
         return;
@@ -1149,11 +1306,8 @@ export function TimelinePanel({
       animation.fps,
     )}`;
 
-  const getClipTitle = (clip: TimelineCameraClip) =>
-    `${clip.label} · ${formatTimecode(clip.startTime, animation.fps)} - ${formatTimecode(
-      clip.endTime,
-      animation.fps,
-    )}`;
+  const getCameraMarkerTitle = (marker: TimelineCameraMarker) =>
+    `${marker.label} · ${formatTimecode(marker.time, animation.fps)}`;
 
   const getIoMarkerTitle = (type: "in" | "out", time: number) =>
     `${type === "in" ? "入点" : "出点"} · 第 ${formatFrameLabel(
@@ -1190,14 +1344,28 @@ export function TimelinePanel({
       return;
     }
     beginHistoryDraft();
+    const keyframeLeft =
+      (keyframe.time / Math.max(timelineExtentSeconds, 0.001)) * laneRect.width;
     setDraggingKeyframe({
       id: keyframe.id,
       refs: keyframe.refs,
       time: keyframe.time,
       laneLeft: laneRect.left,
       laneWidth: laneRect.width,
+      pointerOffsetX: event.clientX - laneRect.left - keyframeLeft,
     });
   };
+
+  const isLastEditedKeyframe = (keyframe: TimelineDisplayKeyframe) =>
+    lastEditedKeyframeIds.includes(keyframe.id) ||
+    keyframe.refs.some((ref) => {
+      if (ref.kind !== "channel") {
+        return false;
+      }
+      return lastEditedKeyframeIds.includes(
+        `${ref.bindingId}:${ref.channelId}:${ref.keyframeId}`,
+      );
+    });
 
   const renderLane = (
     keyframes: TimelineDisplayKeyframe[],
@@ -1210,12 +1378,12 @@ export function TimelinePanel({
         <button
           className={`timeline-keyframe ${
             Math.abs(keyframe.time - animation.currentTime) < 0.0001 ? "is-active" : ""
-          } ${
-            lastEditedKeyframeIds.includes(keyframe.id) ? "is-last-edited" : ""
-          } ${selectedKeyframe?.id === keyframe.id ? "is-selected" : ""}`}
+          } ${isLastEditedKeyframe(keyframe) ? "is-last-edited" : ""} ${
+            selectedKeyframe?.id === keyframe.id ? "is-selected" : ""
+          }`}
           key={keyframe.id}
           style={{
-            left: `${(keyframe.time / Math.max(animation.duration, 0.001)) * 100}%`,
+            left: `${(keyframe.time / Math.max(timelineExtentSeconds, 0.001)) * 100}%`,
           }}
           title={getKeyframeTitle(keyframe)}
           type="button"
@@ -1225,13 +1393,15 @@ export function TimelinePanel({
       {interactive ? (
         <input
           className="timeline-scrubber"
-          max={animation.duration}
+          max={timelineExtentSeconds}
           min={0}
           step={1 / animation.fps}
           type="range"
           value={animation.currentTime}
           onInput={(event) => {
-            setAnimationTime(Number((event.target as HTMLInputElement).value));
+            const nextTime = Number((event.target as HTMLInputElement).value);
+            ensureTimelineCoversTime(nextTime);
+            setAnimationTime(nextTime);
           }}
         />
       ) : null}
@@ -1243,107 +1413,61 @@ export function TimelinePanel({
       className="timeline-track-lane timeline-camera-lane"
       onPointerDown={handleTimelineLanePointerDown}
     >
-      {!cameraCutClips.length ? (
-        <span className="timeline-camera-empty">未添机位序列</span>
+      {!cameraCutMarkers.length ? (
+        <span className="timeline-camera-empty">未添加机位切换点</span>
       ) : null}
-      {cameraCutClips.map((clip) => {
-        const left = (clip.startTime / Math.max(animation.duration, 0.001)) * 100;
-        const width =
-          ((clip.endTime - clip.startTime) / Math.max(animation.duration, 0.001)) * 100;
-        const cutRef = clip.refs.find((ref) => ref.kind === "cameraCut");
+    </div>
+  );
+
+  const renderCameraMarkerLayer = () => (
+    <div className="timeline-camera-marker-layer" aria-hidden={!cameraCutMarkers.length}>
+      {cameraMarkerPlacements.map((marker) => {
+        const isSelected = selectedKeyframe?.id === marker.id;
         return (
-          <div
-            className={`timeline-camera-clip ${
-              selectedKeyframe?.id === clip.id ? "is-selected" : ""
-            }`}
-            key={clip.id}
-            role="button"
+          <button
+            aria-label={getCameraMarkerTitle(marker)}
+            className={`timeline-camera-marker ${
+              marker.groupSize > 1 ? "is-staggered" : ""
+            } ${isSelected ? "is-selected" : ""}`}
+            key={marker.id}
             style={{
-              left: `${left}%`,
-              width: `${Math.max(width, 2)}%`,
-            }}
-            tabIndex={0}
-            title={getClipTitle(clip)}
+              left: `${(marker.time / Math.max(timelineExtentSeconds, 0.001)) * 100}%`,
+              "--marker-lane": marker.lane,
+              "--marker-label-y": `${10 + marker.lane * 28}px`,
+            } as CSSProperties}
+            title={getCameraMarkerTitle(marker)}
+            type="button"
             onPointerDown={(event) => {
               event.preventDefault();
               event.stopPropagation();
               const laneRect = event.currentTarget.parentElement?.getBoundingClientRect();
               setSelectedKeyframe({
-                id: clip.id,
-                refs: clip.refs,
-                time: clip.startTime,
+                id: marker.id,
+                refs: marker.refs,
+                time: marker.time,
               });
               if (!laneRect) {
                 return;
               }
               beginHistoryDraft();
+              const markerLeft =
+                (marker.time / Math.max(timelineExtentSeconds, 0.001)) * laneRect.width;
               setDraggingKeyframe({
-                id: clip.id,
-                refs: clip.refs,
-                time: clip.startTime,
+                id: marker.id,
+                refs: marker.refs,
+                time: marker.time,
                 laneLeft: laneRect.left,
                 laneWidth: laneRect.width,
+                pointerOffsetX: event.clientX - laneRect.left - markerLeft,
               });
             }}
           >
-            {cutRef?.kind === "cameraCut" ? (
-              <>
-                <span
-                  className="timeline-camera-clip-handle is-start"
-                  onPointerDown={(event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    const laneRect = event.currentTarget
-                      .closest(".timeline-camera-lane")
-                      ?.getBoundingClientRect();
-                    if (!laneRect) {
-                      return;
-                    }
-                    beginHistoryDraft();
-                    setSelectedKeyframe({
-                      id: clip.id,
-                      refs: clip.refs,
-                      time: clip.startTime,
-                    });
-                    setResizingCameraClip({
-                      cutId: cutRef.cutId,
-                      edge: "start",
-                      laneLeft: laneRect.left,
-                      laneWidth: laneRect.width,
-                    });
-                  }}
-                />
-                <strong>{clip.label}</strong>
-                <span
-                  className="timeline-camera-clip-handle is-end"
-                  onPointerDown={(event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    const laneRect = event.currentTarget
-                      .closest(".timeline-camera-lane")
-                      ?.getBoundingClientRect();
-                    if (!laneRect) {
-                      return;
-                    }
-                    beginHistoryDraft();
-                    setSelectedKeyframe({
-                      id: clip.id,
-                      refs: clip.refs,
-                      time: clip.endTime,
-                    });
-                    setResizingCameraClip({
-                      cutId: cutRef.cutId,
-                      edge: "end",
-                      laneLeft: laneRect.left,
-                      laneWidth: laneRect.width,
-                    });
-                  }}
-                />
-              </>
-            ) : (
-              <strong>{clip.label}</strong>
-            )}
-          </div>
+            <span className="timeline-camera-marker-line" />
+            <span className="timeline-camera-marker-label">
+              <Camera size={12} />
+              <span>{marker.label}</span>
+            </span>
+          </button>
         );
       })}
     </div>
@@ -1355,7 +1479,7 @@ export function TimelinePanel({
       style={
         {
           "--playhead-left": `${
-            (animation.currentTime / Math.max(animation.duration, 0.001)) * 100
+            (animation.currentTime / Math.max(timelineExtentSeconds, 0.001)) * 100
           }%`,
         } as CSSProperties
       }
@@ -1369,9 +1493,9 @@ export function TimelinePanel({
       return null;
     }
 
-    const left = (ioRange.startTime / Math.max(animation.duration, 0.001)) * 100;
+    const left = (ioRange.startTime / Math.max(timelineExtentSeconds, 0.001)) * 100;
     const width =
-      ((ioRange.endTime - ioRange.startTime) / Math.max(animation.duration, 0.001)) * 100;
+      ((ioRange.endTime - ioRange.startTime) / Math.max(timelineExtentSeconds, 0.001)) * 100;
 
     return (
       <div
@@ -1393,7 +1517,7 @@ export function TimelinePanel({
             draggingRangePoint?.type === "in" ? "is-dragging" : ""
           }`}
           style={{
-            left: `${(animation.inPointTime / Math.max(animation.duration, 0.001)) * 100}%`,
+            left: `${(animation.inPointTime / Math.max(timelineExtentSeconds, 0.001)) * 100}%`,
           }}
           title={getIoMarkerTitle("in", animation.inPointTime)}
           type="button"
@@ -1414,7 +1538,7 @@ export function TimelinePanel({
             draggingRangePoint?.type === "out" ? "is-dragging" : ""
           }`}
           style={{
-            left: `${(animation.outPointTime / Math.max(animation.duration, 0.001)) * 100}%`,
+            left: `${(animation.outPointTime / Math.max(timelineExtentSeconds, 0.001)) * 100}%`,
           }}
           title={getIoMarkerTitle("out", animation.outPointTime)}
           type="button"
@@ -1566,7 +1690,13 @@ export function TimelinePanel({
         </button>
       ) : null}
       <div className="timeline-dock-bar">
-        <button className="timeline-toggle-button" type="button" onClick={onToggle}>
+        <button
+          aria-label="展开时间线"
+          className="timeline-toggle-button"
+          title="展开时间线"
+          type="button"
+          onClick={onToggle}
+        >
           <Video size={15} />
           <span>关键帧动画</span>
           <ChevronUp className={expanded ? "is-expanded" : ""} size={15} />
@@ -1589,7 +1719,7 @@ export function TimelinePanel({
             <span>自动关键帧</span>
           </button>
           <button className="timeline-primary-button" type="button" onClick={handleCapture}>
-            <KeyRound size={14} />
+            <InsertKeyframeIcon size={14} />
             <span>手动插帧</span>
           </button>
           <button
@@ -1608,41 +1738,7 @@ export function TimelinePanel({
         <div className="timeline-panel-body">
           <div className="timeline-editor-toolbar">
             <div className="timeline-toolbar-main">
-              <div className="timeline-toolbar-left">
-                <button className="timeline-editor-title" type="button" onClick={onToggle}>
-                  <Video size={15} />
-                  <strong>关键帧动画</strong>
-                  <ChevronDown size={15} />
-                </button>
-                <label className="timeline-fps-field">
-                  <span>帧率:</span>
-                  <select
-                    value={animation.fps}
-                    onChange={(event) => setAnimationFps(Number(event.target.value))}
-                  >
-                    {[24, 25, 30].map((fps) => (
-                      <option key={fps} value={fps}>
-                        {fps}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
               <div className="timeline-playback-group">
-                <button
-                  aria-label="上一关键帧"
-                  className="timeline-icon-button"
-                  data-tooltip="上一关键帧"
-                  title="上一关键帧"
-                  type="button"
-                  onBlur={hideToolbarTooltip}
-                  onClick={() => moveToAdjacentKeyframe(-1)}
-                  onFocus={(event) => showToolbarTooltip(event, "上一关键帧")}
-                  onMouseEnter={(event) => showToolbarTooltip(event, "上一关键帧")}
-                  onMouseLeave={hideToolbarTooltip}
-                >
-                  <SkipBack size={14} />
-                </button>
                 <button
                   aria-label={animation.isPlaying ? "暂停" : "播放"}
                   className="timeline-icon-button"
@@ -1663,7 +1759,35 @@ export function TimelinePanel({
                     toggleAnimationPlayback();
                   }}
                 >
-                  {animation.isPlaying ? <Pause size={14} /> : <Play size={14} />}
+                  {animation.isPlaying ? <Pause size={19} /> : <Play size={19} />}
+                </button>
+                <button
+                  aria-label="上一关键帧"
+                  className="timeline-icon-button"
+                  data-tooltip="上一关键帧"
+                  title="上一关键帧"
+                  type="button"
+                  onBlur={hideToolbarTooltip}
+                  onClick={() => moveToAdjacentKeyframe(-1)}
+                  onFocus={(event) => showToolbarTooltip(event, "上一关键帧")}
+                  onMouseEnter={(event) => showToolbarTooltip(event, "上一关键帧")}
+                  onMouseLeave={hideToolbarTooltip}
+                >
+                  <SkipBack size={17} />
+                </button>
+                <button
+                  aria-label="手动插帧"
+                  className="timeline-icon-button"
+                  data-tooltip="手动插帧"
+                  title="手动插帧"
+                  type="button"
+                  onBlur={hideToolbarTooltip}
+                  onClick={handleCapture}
+                  onFocus={(event) => showToolbarTooltip(event, "手动插帧")}
+                  onMouseEnter={(event) => showToolbarTooltip(event, "手动插帧")}
+                  onMouseLeave={hideToolbarTooltip}
+                >
+                  <InsertKeyframeIcon size={17} />
                 </button>
                 <button
                   aria-label="下一关键帧"
@@ -1677,10 +1801,34 @@ export function TimelinePanel({
                   onMouseEnter={(event) => showToolbarTooltip(event, "下一关键帧")}
                   onMouseLeave={hideToolbarTooltip}
                 >
-                  <SkipForward size={14} />
+                  <SkipForward size={17} />
                 </button>
               </div>
-              <div className="timeline-toolbar-actions">
+              <div className="timeline-toolbar-center">
+                <label className="timeline-fps-field">
+                  <span>帧率</span>
+                  <select
+                    value={animation.fps}
+                    onChange={(event) => setAnimationFps(Number(event.target.value))}
+                  >
+                    {[24, 25, 30].map((fps) => (
+                      <option key={fps} value={fps}>
+                        {fps}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  aria-label="自动关键帧"
+                  className={`timeline-auto-key-toggle ${
+                    animation.autoKeyEnabled ? "is-active" : ""
+                  }`}
+                  type="button"
+                  onClick={() => setAnimationAutoKeyEnabled(!animation.autoKeyEnabled)}
+                >
+                  <span>自动关键帧</span>
+                  <i aria-hidden="true" />
+                </button>
                 <button
                   aria-label="设置入点"
                   className="timeline-icon-button"
@@ -1710,63 +1858,50 @@ export function TimelinePanel({
                   <CornerDownLeft size={14} />
                 </button>
                 <button
-                  aria-label="自动关键帧"
-                  className={`timeline-icon-button timeline-auto-key-button ${
-                    animation.autoKeyEnabled ? "is-active" : ""
-                  }`}
-                  data-tooltip="自动关键帧"
-                  title="自动关键帧"
-                  type="button"
-                  onBlur={hideToolbarTooltip}
-                  onClick={() => setAnimationAutoKeyEnabled(!animation.autoKeyEnabled)}
-                  onFocus={(event) => showToolbarTooltip(event, "自动关键帧")}
-                  onMouseEnter={(event) => showToolbarTooltip(event, "自动关键帧")}
-                  onMouseLeave={hideToolbarTooltip}
-                >
-                  <Circle size={10} />
-                </button>
-                <button
-                  aria-label="手动插帧"
-                  className="timeline-icon-button timeline-primary-button"
-                  data-tooltip="手动插帧"
-                  title="手动插帧"
-                  type="button"
-                  onBlur={hideToolbarTooltip}
-                  onClick={handleCapture}
-                  onFocus={(event) => showToolbarTooltip(event, "手动插帧")}
-                  onMouseEnter={(event) => showToolbarTooltip(event, "手动插帧")}
-                  onMouseLeave={hideToolbarTooltip}
-                >
-                  <KeyRound size={14} />
-                </button>
-                <button
-                  aria-label="删除关键帧"
+                  aria-label="删除"
                   className="timeline-icon-button"
-                  data-tooltip="删除关键帧"
-                  title="删除关键帧"
+                  data-tooltip="删除"
+                  title="删除"
                   disabled={!selectedKeyframe}
                   type="button"
                   onBlur={hideToolbarTooltip}
                   onClick={handleDeleteSelectedKeyframe}
-                  onFocus={(event) => showToolbarTooltip(event, "删除关键帧")}
-                  onMouseEnter={(event) => showToolbarTooltip(event, "删除关键帧")}
+                  onFocus={(event) => showToolbarTooltip(event, "删除")}
+                  onMouseEnter={(event) => showToolbarTooltip(event, "删除")}
                   onMouseLeave={hideToolbarTooltip}
                 >
                   <Trash2 size={14} />
                 </button>
+              </div>
+              <div className="timeline-toolbar-actions">
                 <button
-                  aria-label="导出视频"
-                  className="timeline-icon-button"
-                  data-tooltip="导出视频"
-                  title="导出视频"
+                  aria-label="收起时间线"
+                  className="timeline-icon-button timeline-collapse-button"
+                  data-tooltip="收起时间线"
+                  title="收起时间线"
+                  type="button"
+                  onBlur={hideToolbarTooltip}
+                  onClick={onToggle}
+                  onFocus={(event) => showToolbarTooltip(event, "收起时间线")}
+                  onMouseEnter={(event) => showToolbarTooltip(event, "收起时间线")}
+                  onMouseLeave={hideToolbarTooltip}
+                >
+                  <ChevronDown size={16} />
+                </button>
+                <button
+                  aria-label="生成视频"
+                  className="timeline-generate-button"
+                  data-tooltip="生成视频"
+                  title="生成视频"
                   type="button"
                   onBlur={hideToolbarTooltip}
                   onClick={openExportDialog}
-                  onFocus={(event) => showToolbarTooltip(event, "导出视频")}
-                  onMouseEnter={(event) => showToolbarTooltip(event, "导出视频")}
+                  onFocus={(event) => showToolbarTooltip(event, "生成视频")}
+                  onMouseEnter={(event) => showToolbarTooltip(event, "生成视频")}
                   onMouseLeave={hideToolbarTooltip}
                 >
-                  <Download size={14} />
+                  <Download size={18} />
+                  <span>生成</span>
                 </button>
               </div>
             </div>
@@ -1861,11 +1996,11 @@ export function TimelinePanel({
               </span>
             </div>
             <div className="timeline-camera-label" ref={cameraMenuRef}>
-              <span>机位序列</span>
+              <span>机位切换</span>
               <button
                 className="timeline-camera-add-button"
                 type="button"
-                title="添加机位序列"
+                title="添加机位切换点"
                 onClick={() => setCameraMenuOpen((current) => !current)}
               >
                 <Plus size={14} />
@@ -1913,6 +2048,7 @@ export function TimelinePanel({
                   {renderIoMarkers()}
                 </div>
                 {renderCameraLane()}
+                {renderCameraMarkerLayer()}
                 <div
                   className="timeline-track-list timeline-tree-list timeline-lane-list"
                   ref={timelineRightListRef}

@@ -18,7 +18,6 @@ import type {
 const MIN_DURATION = 1;
 const MIN_FPS = 1;
 const MAX_FPS = 60;
-const MIN_CAMERA_CLIP_FRAMES = 1;
 
 function isVec3Value(value: AnimationChannelValue): value is Vec3 {
   return Array.isArray(value);
@@ -36,15 +35,44 @@ function getCameraCutStart(cut: AnimationCameraCut) {
   return cut.startTime ?? cut.time ?? 0;
 }
 
-function getCameraCutEnd(cut: AnimationCameraCut, duration?: number) {
-  const fallbackEnd = duration ?? Math.max(getCameraCutStart(cut), cut.time ?? 0);
-  return cut.endTime ?? fallbackEnd;
-}
-
 function sortCameraCuts(cameraCuts: AnimationCameraCut[]) {
   return [...cameraCuts].sort(
-    (left, right) => getCameraCutStart(left) - getCameraCutStart(right),
+    (left, right) =>
+      getCameraCutStart(left) - getCameraCutStart(right) || left.id.localeCompare(right.id),
   );
+}
+
+function getTimelineFrame(time: number, fps: number) {
+  return Math.round(quantizeAnimationTime(time, fps) * clampAnimationFps(fps));
+}
+
+function frameToTime(frame: number, fps: number) {
+  return frame / clampAnimationFps(fps);
+}
+
+function findNearestFreeFrame(
+  preferredFrame: number,
+  occupiedFrames: Set<number>,
+  maxFrame: number,
+) {
+  const safeMaxFrame = Math.max(0, maxFrame);
+  const startFrame = Math.min(safeMaxFrame, Math.max(0, preferredFrame));
+  if (!occupiedFrames.has(startFrame)) {
+    return startFrame;
+  }
+
+  for (let offset = 1; offset <= safeMaxFrame; offset += 1) {
+    const after = startFrame + offset;
+    if (after <= safeMaxFrame && !occupiedFrames.has(after)) {
+      return after;
+    }
+    const before = startFrame - offset;
+    if (before >= 0 && !occupiedFrames.has(before)) {
+      return before;
+    }
+  }
+
+  return startFrame;
 }
 
 export function clampAnimationDuration(value: number) {
@@ -154,15 +182,9 @@ export function resolvePlaybackCameraId(
   fallbackCameraId?: string,
 ) {
   const ordered = sortCameraCuts(cameraCuts);
-  const matched =
-    ordered.find(
-      (cut) =>
-        getCameraCutStart(cut) <= time + 0.0001 &&
-        time < getCameraCutEnd(cut) - 0.0001,
-    ) ??
-    ordered
-      .filter((cut) => getCameraCutStart(cut) <= time + 0.0001)
-      .at(-1);
+  const matched = ordered
+    .filter((cut) => getCameraCutStart(cut) <= time + 0.0001)
+    .at(-1);
   return matched?.cameraId ?? fallbackCameraId;
 }
 
@@ -377,26 +399,19 @@ export function upsertAnimationCameraCut(
 ) {
   const nextStartTime = clampAnimationTime(time, duration, fps);
   const nextDuration = clampAnimationDuration(duration);
-  const minLength = MIN_CAMERA_CLIP_FRAMES / clampAnimationFps(fps);
-  const existingIndex = cameraCuts.findIndex(
-    (cut) => Math.abs(getCameraCutStart(cut) - nextStartTime) < 0.0001,
+  const targetFrame = getTimelineFrame(nextStartTime, fps);
+  const existingIndex = normalizeCameraCuts(cameraCuts, nextDuration, fps).findIndex(
+    (cut) => getTimelineFrame(getCameraCutStart(cut), fps) === targetFrame,
   );
-  const defaultStartTime = cameraCuts.length ? nextStartTime : 0;
-  const defaultEndTime = nextDuration;
-  const nextCut: AnimationCameraCut = {
-    id: existingIndex >= 0 ? cameraCuts[existingIndex].id : `camera_cut_${crypto.randomUUID()}`,
-    cameraId,
-    startTime: Math.min(defaultStartTime, nextDuration - minLength),
-    endTime: defaultEndTime,
-  };
-  if (existingIndex < 0) {
-    return normalizeCameraCuts([...cameraCuts, nextCut], nextDuration, fps);
+  if (existingIndex >= 0) {
+    return normalizeCameraCuts(cameraCuts, nextDuration, fps);
   }
-  return normalizeCameraCuts(
-    cameraCuts.map((cut, index) => (index === existingIndex ? nextCut : cut)),
-    nextDuration,
-    fps,
-  );
+  const nextCut: AnimationCameraCut = {
+    id: `camera_cut_${crypto.randomUUID()}`,
+    cameraId,
+    startTime: nextStartTime,
+  };
+  return normalizeCameraCuts([...cameraCuts, nextCut], nextDuration, fps);
 }
 
 export function normalizeCameraCuts(
@@ -405,34 +420,34 @@ export function normalizeCameraCuts(
   fps: number,
 ) {
   const nextDuration = clampAnimationDuration(duration);
-  const minLength = MIN_CAMERA_CLIP_FRAMES / clampAnimationFps(fps);
-  const ordered = sortCameraCuts(cameraCuts)
-    .map((cut) => {
-      const startTime = clampAnimationTime(getCameraCutStart(cut), nextDuration, fps);
-      const rawEndTime = cut.endTime === undefined ? nextDuration : cut.endTime;
-      const endTime = Math.min(
-        nextDuration,
-        Math.max(startTime + minLength, clampAnimationTime(rawEndTime, nextDuration, fps)),
-      );
-      return {
-        id: cut.id,
-        cameraId: cut.cameraId,
-        startTime,
-        endTime,
-      };
-    })
-    .filter((cut) => cut.endTime - cut.startTime >= minLength - 0.0001);
-
-  return ordered.map((cut, index) => {
-    const nextCut = ordered[index + 1];
-    if (!nextCut) {
-      return cut;
+  const byFrame = new Map<number, AnimationCameraCut>();
+  sortCameraCuts(cameraCuts).forEach((cut) => {
+    const startTime = clampAnimationTime(getCameraCutStart(cut), nextDuration, fps);
+    const frame = getTimelineFrame(startTime, fps);
+    if (byFrame.has(frame)) {
+      return;
     }
-    return {
-      ...cut,
-      endTime: Math.min(cut.endTime, Math.max(cut.startTime + minLength, nextCut.startTime)),
-    };
+    byFrame.set(frame, {
+      id: cut.id,
+      cameraId: cut.cameraId,
+      startTime,
+      time: startTime,
+    });
   });
+  return sortCameraCuts(Array.from(byFrame.values()));
+}
+
+export function hasCameraCutAtTime(
+  cameraCuts: AnimationCameraCut[],
+  time: number,
+  duration: number,
+  fps: number,
+) {
+  const nextTime = clampAnimationTime(time, duration, fps);
+  const targetFrame = getTimelineFrame(nextTime, fps);
+  return normalizeCameraCuts(cameraCuts, duration, fps).some(
+    (cut) => getTimelineFrame(getCameraCutStart(cut), fps) === targetFrame,
+  );
 }
 
 function normalizeKeyframes(keyframes: AnimationKeyframe[]) {
@@ -557,21 +572,25 @@ export function moveCameraCuts(
     return cameraCuts;
   }
   const nextDuration = clampAnimationDuration(duration);
-  const minLength = MIN_CAMERA_CLIP_FRAMES / clampAnimationFps(fps);
   const normalized = normalizeCameraCuts(cameraCuts, nextDuration, fps);
+  const maxFrame = Math.round(nextDuration * clampAnimationFps(fps));
+  const occupiedFrames = new Set(
+    normalized
+      .filter((cut) => !cutIds.has(cut.id))
+      .map((cut) => getTimelineFrame(getCameraCutStart(cut), fps)),
+  );
+  const preferredFrame = getTimelineFrame(clampAnimationTime(nextTime, nextDuration, fps), fps);
   const nextCuts = normalized.map((cut) => {
     if (!cutIds.has(cut.id)) {
       return cut;
     }
-    const length = Math.max(minLength, cut.endTime - cut.startTime);
-    const startTime = Math.min(
-      nextDuration - length,
-      Math.max(0, clampAnimationTime(nextTime, nextDuration, fps)),
-    );
+    const startFrame = findNearestFreeFrame(preferredFrame, occupiedFrames, maxFrame);
+    occupiedFrames.add(startFrame);
+    const startTime = frameToTime(startFrame, fps);
     return {
       ...cut,
       startTime,
-      endTime: startTime + length,
+      time: startTime,
     };
   });
   return normalizeCameraCuts(nextCuts, nextDuration, fps);
@@ -585,27 +604,11 @@ export function resizeCameraCut(
   duration: number,
   fps: number,
 ) {
-  const nextDuration = clampAnimationDuration(duration);
-  const minLength = MIN_CAMERA_CLIP_FRAMES / clampAnimationFps(fps);
-  const nextTime = clampAnimationTime(time, nextDuration, fps);
-  const normalized = normalizeCameraCuts(cameraCuts, nextDuration, fps);
-  return normalizeCameraCuts(
-    normalized.map((cut) => {
-      if (cut.id !== cutId) {
-        return cut;
-      }
-      if (edge === "start") {
-        return {
-          ...cut,
-          startTime: Math.min(nextTime, cut.endTime - minLength),
-        };
-      }
-      return {
-        ...cut,
-        endTime: Math.max(nextTime, cut.startTime + minLength),
-      };
-    }),
-    nextDuration,
+  return moveCameraCuts(
+    cameraCuts,
+    [{ kind: "cameraCut", cutId }],
+    time,
+    duration,
     fps,
   );
 }

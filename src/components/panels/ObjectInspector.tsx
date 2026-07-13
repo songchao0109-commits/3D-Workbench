@@ -4,6 +4,7 @@ import {
   Eye,
   EyeOff,
   Lock,
+  MoveDown,
   Trash2,
   Unlock,
 } from "lucide-react";
@@ -37,6 +38,7 @@ export function ObjectInspector({ object }: { object: SceneObject }) {
     (state) => state.toggleObjectBoundsVisible,
   );
   const removeObject = useProjectStore((state) => state.removeObject);
+  const snapSelectionToGround = useProjectStore((state) => state.snapSelectionToGround);
 
   const disabled = object.locked;
   const actualDimensions = object.actualDimensions ?? [0, 0, 0];
@@ -71,6 +73,7 @@ export function ObjectInspector({ object }: { object: SceneObject }) {
             onClick={() => toggleObjectVisible(object.id)}
           >
             {object.visible ? <Eye size={15} /> : <EyeOff size={15} />}
+            <span>{object.visible ? "隐藏" : "显示"}</span>
           </button>
           <button
             title={object.locked ? "解锁" : "锁定"}
@@ -78,6 +81,7 @@ export function ObjectInspector({ object }: { object: SceneObject }) {
             onClick={() => toggleObjectLocked(object.id)}
           >
             {object.locked ? <Lock size={15} /> : <Unlock size={15} />}
+            <span>{object.locked ? "解锁" : "锁定"}</span>
           </button>
           <button
             title="删除"
@@ -140,6 +144,15 @@ export function ObjectInspector({ object }: { object: SceneObject }) {
                 })
               }
             />
+            <button
+              className="property-action-button"
+              disabled={disabled}
+              type="button"
+              onClick={snapSelectionToGround}
+            >
+              <MoveDown size={15} />
+              <span>吸附到地面</span>
+            </button>
           </div>
         ) : null}
       </div>

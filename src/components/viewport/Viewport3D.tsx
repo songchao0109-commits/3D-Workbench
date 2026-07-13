@@ -33,6 +33,7 @@ import {
   loadGlbFromFile,
   loadGlbFromUrl,
   normalizeImportedScene,
+  remapRigToScene,
 } from "../../three/glbLoader";
 import {
   createPlaceholderCharacter,
@@ -99,49 +100,19 @@ export function Viewport3D() {
   const storeRef = useRef(useProjectStore.getState());
   const draggingRef = useRef(false);
   const [viewportLabels, setViewportLabels] = useState<
-    Array<{ id: string; label: string; x: number; y: number; active: boolean }>
+    Array<{
+      id: string;
+      label: string;
+      x: number;
+      y: number;
+      active: boolean;
+      kind?: "group";
+    }>
   >([]);
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [orientationAxes, setOrientationAxes] = useState(defaultOrientationAxes);
   const orientationAxesRef = useRef(defaultOrientationAxes);
   const cameraPreviewActive = useProjectStore((state) => state.cameraPreviewActive);
   const outputFrame = useProjectStore((state) => state.outputFrame);
-  const hasSelection = useProjectStore((state) => {
-    const selectedIds = state.selectedObjectIds.length
-      ? state.selectedObjectIds
-      : state.activeObjectId
-        ? [state.activeObjectId]
-        : [];
-    return selectedIds.length > 0 || Boolean(state.activeGroupId);
-  });
-  const hasClipboard = useProjectStore((state) =>
-    Boolean(state.clipboard?.objects.length || state.clipboard?.groups.length),
-  );
-  const canGroup = useProjectStore((state) => {
-    const selectedIds = state.selectedObjectIds.length
-      ? state.selectedObjectIds
-      : state.activeObjectId
-        ? [state.activeObjectId]
-        : [];
-    return (
-      selectedIds.length > 1 &&
-      selectedIds.every(
-        (objectId) => !state.groups.some((group) => group.objectIds.includes(objectId)),
-      )
-    );
-  });
-  const canUngroup = useProjectStore((state) => {
-    const selectedIds = state.selectedObjectIds.length
-      ? state.selectedObjectIds
-      : state.activeObjectId
-        ? [state.activeObjectId]
-        : [];
-    const selectedGroups = state.groups.filter((group) =>
-      selectedIds.some((objectId) => group.objectIds.includes(objectId)),
-    );
-    return Boolean(state.activeGroupId) || selectedGroups.length > 0;
-  });
-
   useEffect(() => {
     const unsubscribe = useProjectStore.subscribe((state) => {
       storeRef.current = state;
@@ -196,6 +167,7 @@ export function Viewport3D() {
     ];
     const cameraRigs = new Map<string, THREE.Object3D>();
     const objectBoundsHelpers = new Map<string, THREE.BoxHelper>();
+    const groupBoundsHelpers = new Map<string, THREE.Box3Helper>();
     const runtimeLoadWarnings = new Set<string>();
     let activeCameraAimId: string | undefined;
     let panoramaTexture: THREE.Texture | undefined;
@@ -206,6 +178,16 @@ export function Viewport3D() {
     let previousPlaybackActive = false;
     let exportInProgress = false;
     let pointerDownPosition = { x: 0, y: 0 };
+    let pendingAltDuplicate = false;
+    let altDuplicatePreview:
+      | {
+          originalObjectIds: string[];
+          originalActiveGroupId?: string;
+          originalActiveObjectId?: string;
+          previewObjectIds: string[];
+          sourceObjectIds: string[];
+        }
+      | undefined;
     let editorPose:
       | {
           fov: number;
@@ -273,15 +255,53 @@ export function Viewport3D() {
     transformControls.addEventListener("dragging-changed", (event) => {
       const store = useProjectStore.getState();
       if (event.value) {
+        draggingRef.current = true;
         store.beginHistoryDraft();
+        if (pendingAltDuplicate) {
+          const original = useProjectStore.getState();
+          const originalObjectIds = original.selectedObjectIds.length
+            ? [...original.selectedObjectIds]
+            : original.activeObjectId
+              ? [original.activeObjectId]
+              : [];
+          const transformObject = transformControls.object;
+          if (
+            originalObjectIds.length === 1 &&
+            transformObject &&
+            transformObject !== selectionPivot
+          ) {
+            selectionPivot.position.copy(transformObject.position);
+            selectionPivot.rotation.copy(transformObject.rotation);
+            selectionPivot.scale.copy(transformObject.scale);
+            selectionPivot.updateMatrixWorld(true);
+            pivotMatrixPrevious.copy(selectionPivot.matrixWorld);
+            transformControls.attach(selectionPivot);
+            transformControls.setMode(original.transformMode);
+            transformControls.space = "world";
+          }
+          const result = store.duplicateSelection({ offset: 0 });
+          if (result.ok) {
+            altDuplicatePreview = {
+              originalObjectIds,
+              originalActiveGroupId: original.activeGroupId,
+              originalActiveObjectId: original.activeObjectId,
+              previewObjectIds: result.objectIds,
+              sourceObjectIds: result.sourceObjectIds,
+            };
+          }
+        }
+        pendingAltDuplicate = false;
       }
       draggingRef.current = Boolean(event.value);
       controls.enabled = !event.value;
       if (!event.value) {
+        pendingAltDuplicate = false;
         store.commitHistoryDraft();
+        altDuplicatePreview = undefined;
         const state = useProjectStore.getState();
         state.objects.forEach(applyObjectState);
         syncObjectBounds();
+        syncGroupBounds();
         syncCameraRigs(state.cameras);
         syncWorldSettings();
         resizePreviewRenderer();
@@ -610,12 +630,16 @@ export function Viewport3D() {
       if (existing && existing.parent !== worldRoot) {
         sceneRegistry.unregisterObject(objectState.id);
       }
-      const source = objectState.sourceObjectId
-        ? sceneRegistry.getObject(objectState.sourceObjectId)
-        : undefined;
-      const runtimeObject = source ? source.clone(true) : createRuntimeObjectFromState(objectState);
+      const runtimeObject = createRuntimeObjectFromState(objectState);
       Promise.resolve(runtimeObject).then((object) => {
         if (disposed) {
+          disposeObject3D(object);
+          return;
+        }
+        const latestObjectState = useProjectStore
+          .getState()
+          .objects.find((item) => item.id === objectState.id);
+        if (!latestObjectState) {
           disposeObject3D(object);
           return;
         }
@@ -624,11 +648,24 @@ export function Viewport3D() {
           disposeObject3D(object);
           return;
         }
-        markRuntimeObject(object, objectState.id);
+        const rig = latestObjectState.rig?.hasSkeleton
+          ? remapRigToScene(object, latestObjectState.rig)
+          : latestObjectState.rig;
+        const resolvedObjectState = rig
+          ? { ...latestObjectState, rig }
+          : latestObjectState;
+        if (rig) {
+          useProjectStore.setState((state) => ({
+            objects: state.objects.map((item) =>
+              item.id === resolvedObjectState.id ? resolvedObjectState : item,
+            ),
+          }));
+        }
+        markRuntimeObject(object, resolvedObjectState.id);
         worldRoot.add(object);
-        sceneRegistry.registerObject(objectState.id, object);
-        skeletonRegistry.register(objectState.id, object);
-        applyObjectState(objectState);
+        sceneRegistry.registerObject(resolvedObjectState.id, object);
+        skeletonRegistry.register(resolvedObjectState.id, object);
+        applyObjectState(resolvedObjectState);
       });
     };
 
@@ -687,6 +724,61 @@ export function Viewport3D() {
       });
     };
 
+    const syncGroupBounds = () => {
+      const activeGroup = storeRef.current.activeGroupId
+        ? storeRef.current.groups.find((group) => group.id === storeRef.current.activeGroupId)
+        : undefined;
+      const activeGroupId = activeGroup?.visible ? activeGroup.id : undefined;
+
+      Array.from(groupBoundsHelpers.entries()).forEach(([groupId, helper]) => {
+        if (groupId === activeGroupId) {
+          return;
+        }
+        helper.parent?.remove(helper);
+        helper.geometry.dispose();
+        (helper.material as THREE.Material).dispose();
+        groupBoundsHelpers.delete(groupId);
+      });
+
+      if (!activeGroup || !activeGroupId) {
+        return;
+      }
+
+      const box = new THREE.Box3();
+      let hasVisibleMember = false;
+      activeGroup.objectIds.forEach((objectId) => {
+        const objectState = storeRef.current.objects.find((object) => object.id === objectId);
+        const runtimeObject = sceneRegistry.getObject(objectId);
+        if (!objectState?.visible || !runtimeObject) {
+          return;
+        }
+        box.expandByObject(runtimeObject);
+        hasVisibleMember = true;
+      });
+
+      if (!hasVisibleMember || box.isEmpty()) {
+        const helper = groupBoundsHelpers.get(activeGroup.id);
+        if (helper) {
+          helper.visible = false;
+        }
+        return;
+      }
+
+      let helper = groupBoundsHelpers.get(activeGroup.id);
+      if (!helper) {
+        helper = new THREE.Box3Helper(box.clone(), 0xffc857);
+        const material = helper.material as THREE.LineBasicMaterial;
+        material.transparent = true;
+        material.opacity = 0.95;
+        material.depthTest = false;
+        scene.add(helper);
+        groupBoundsHelpers.set(activeGroup.id, helper);
+      } else {
+        helper.box.copy(box);
+      }
+      helper.visible = true;
+    };
+
     const syncWorldSettings = () => {
       const { rootTransform, ground: groundSettings } = storeRef.current.worldSettings;
       worldRoot.position.set(...rootTransform.position);
@@ -714,6 +806,7 @@ export function Viewport3D() {
         x: number;
         y: number;
         active: boolean;
+        kind?: "group";
       }> = [];
       const projected = new THREE.Vector3();
 
@@ -735,6 +828,43 @@ export function Viewport3D() {
           active: storeRef.current.activeObjectId === item.id,
         });
       });
+
+      const activeGroup = storeRef.current.activeGroupId
+        ? storeRef.current.groups.find((group) => group.id === storeRef.current.activeGroupId)
+        : undefined;
+      const groupBounds = activeGroup ? groupBoundsHelpers.get(activeGroup.id)?.box : undefined;
+      if (activeGroup && groupBounds && !groupBounds.isEmpty()) {
+        const corners = [
+          [groupBounds.min.x, groupBounds.min.y, groupBounds.min.z],
+          [groupBounds.min.x, groupBounds.min.y, groupBounds.max.z],
+          [groupBounds.min.x, groupBounds.max.y, groupBounds.min.z],
+          [groupBounds.min.x, groupBounds.max.y, groupBounds.max.z],
+          [groupBounds.max.x, groupBounds.min.y, groupBounds.min.z],
+          [groupBounds.max.x, groupBounds.min.y, groupBounds.max.z],
+          [groupBounds.max.x, groupBounds.max.y, groupBounds.min.z],
+          [groupBounds.max.x, groupBounds.max.y, groupBounds.max.z],
+        ];
+        let labelX = Number.POSITIVE_INFINITY;
+        let labelY = Number.POSITIVE_INFINITY;
+        corners.forEach(([x, y, z]) => {
+          projected.set(x, y, z).project(camera);
+          if (projected.z < -1 || projected.z > 1) {
+            return;
+          }
+          labelX = Math.min(labelX, ((projected.x + 1) * 0.5) * width);
+          labelY = Math.min(labelY, ((1 - projected.y) * 0.5) * height);
+        });
+        if (Number.isFinite(labelX) && Number.isFinite(labelY)) {
+          nextLabels.push({
+            id: `group:${activeGroup.id}`,
+            label: activeGroup.name,
+            x: labelX,
+            y: labelY,
+            active: true,
+            kind: "group",
+          });
+        }
+      }
 
       storeRef.current.cameras.forEach((item) => {
         const rig = cameraRigs.get(item.id);
@@ -929,9 +1059,9 @@ export function Viewport3D() {
       if (matched.type === "object") {
         activeCameraAimId = undefined;
         if (event.shiftKey || event.metaKey || event.ctrlKey) {
-          useProjectStore.getState().toggleObjectSelection(matched.id);
+          useProjectStore.getState().toggleSelectionUnit(matched.id);
         } else {
-          useProjectStore.getState().setActiveObject(matched.id);
+          useProjectStore.getState().selectObjectOrGroup(matched.id);
         }
         return;
       }
@@ -961,38 +1091,88 @@ export function Viewport3D() {
         return;
       }
       pointerDownPosition = { x: event.clientX, y: event.clientY };
-      setContextMenu(null);
+      const state = storeRef.current;
+      const selectedIds = state.selectedObjectIds.length
+        ? state.selectedObjectIds
+        : state.activeObjectId
+          ? [state.activeObjectId]
+          : [];
+      const transformObject = transformControls.object;
+      const activeObject = state.activeObjectId
+        ? state.objects.find((object) => object.id === state.activeObjectId)
+        : undefined;
+      const canDuplicateTransform =
+        transformObject === selectionPivot ||
+        (Boolean(state.activeObjectId) &&
+          transformObject === sceneRegistry.getObject(state.activeObjectId!));
+      pendingAltDuplicate =
+        event.altKey &&
+        selectedIds.length > 0 &&
+        !state.selectedCameraId &&
+        !activeObject?.rig?.boneControlActive &&
+        canDuplicateTransform;
     };
 
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setContextMenu(null);
+      if (
+        event.key !== "Escape" ||
+        (event.target instanceof HTMLElement &&
+          event.target.closest("input, textarea, select, [contenteditable='true']"))
+      ) {
+        return;
+      }
+      const state = useProjectStore.getState();
+      if (state.activeGroupId) {
+        state.clearSelection();
+        return;
+      }
+      const groupId = state.activeObjectId
+        ? state.groups.find((group) => group.objectIds.includes(state.activeObjectId!))?.id
+        : undefined;
+      if (groupId) {
+        state.setActiveGroup(groupId);
+        return;
+      }
+      if (state.activeObjectId || state.selectedCameraId) {
+        state.clearSelection();
       }
     };
 
-    const handleContextMenu = (event: MouseEvent) => {
-      event.preventDefault();
-      if (storeRef.current.cameraPreviewActive) {
+    const handleKeyUp = (event: KeyboardEvent) => {
+      if (event.key !== "Alt") {
         return;
       }
-      const rect = renderer.domElement.getBoundingClientRect();
-      pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-      pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-      raycaster.setFromCamera(pointer, camera);
-      const objectPickTargets = storeRef.current.objects
-        .map((item) => sceneRegistry.getObject(item.id))
-        .filter((item): item is THREE.Object3D => Boolean(item));
-      const matched = raycaster
-        .intersectObjects(objectPickTargets, true)
-        .map((intersection) => resolveSelectableTarget(intersection.object))
-        .find((target) => target?.type === "object");
-      if (matched?.type === "object") {
-        const current = useProjectStore.getState();
-        if (!current.selectedObjectIds.includes(matched.id)) {
-          current.setActiveObject(matched.id);
-        }
+      pendingAltDuplicate = false;
+      const preview = altDuplicatePreview;
+      if (!preview || !draggingRef.current) {
+        return;
       }
-      setContextMenu({ x: event.clientX, y: event.clientY });
+      const state = useProjectStore.getState();
+      const originalTransforms = preview.previewObjectIds.flatMap(
+        (previewObjectId, index) => {
+          const previewObject = state.objects.find((object) => object.id === previewObjectId);
+          const originalObjectId = preview.sourceObjectIds[index];
+          if (!previewObject || !originalObjectId) {
+            return [];
+          }
+          return [
+            {
+              id: originalObjectId,
+              position: previewObject.position,
+              rotation: previewObject.rotation,
+              scale: previewObject.scale,
+            },
+          ];
+        },
+      );
+      state.cancelAltDuplicatePreview({
+        previewObjectIds: preview.previewObjectIds,
+        originalObjectIds: preview.originalObjectIds,
+        originalActiveGroupId: preview.originalActiveGroupId,
+        originalActiveObjectId: preview.originalActiveObjectId,
+        originalTransforms,
+      });
+      altDuplicatePreview = undefined;
     };
 
     const syncTransformControls = () => {
@@ -1009,6 +1189,9 @@ export function Viewport3D() {
       }
       if (state.cameraPreviewActive) {
         transformControls.detach();
+        return;
+      }
+      if (draggingRef.current && transformControls.object === selectionPivot) {
         return;
       }
       const activeGroup = state.activeGroupId
@@ -1035,6 +1218,9 @@ export function Viewport3D() {
           !selectableObjects.length ||
           (activeGroup && (activeGroup.locked || !activeGroup.visible))
         ) {
+          if (draggingRef.current && transformControls.object === selectionPivot) {
+            return;
+          }
           transformControls.detach();
           return;
         }
@@ -1165,6 +1351,7 @@ export function Viewport3D() {
         axes,
         ...Array.from(cameraRigs.values()),
         ...Array.from(objectBoundsHelpers.values()),
+        ...Array.from(groupBoundsHelpers.values()),
         ...skeletonRegistry.getHelperObjects(),
       ];
       const visibility = helperObjects.map((object) => ({
@@ -1264,12 +1451,14 @@ export function Viewport3D() {
       state.objects.forEach(applyObjectState);
       syncCameraRigs(state.cameras);
       syncObjectBounds();
+      syncGroupBounds();
       syncTransformControls();
     };
 
     const unsubscribeSceneSync = useProjectStore.subscribe((state) => {
       state.objects.forEach(applyObjectState);
       syncObjectBounds();
+      syncGroupBounds();
       syncCameraRigs(state.cameras);
       syncWorldSettings();
       resizePreviewRenderer();
@@ -1471,6 +1660,7 @@ export function Viewport3D() {
       window.setTimeout(() => {
         if (!disposed) {
           syncObjectBounds();
+          syncGroupBounds();
           syncTransformControls();
         }
       }, 0);
@@ -1494,6 +1684,7 @@ export function Viewport3D() {
       window.setTimeout(() => {
         if (!disposed) {
           syncObjectBounds();
+          syncGroupBounds();
           syncTransformControls();
         }
       }, 0);
@@ -1757,7 +1948,6 @@ export function Viewport3D() {
         ? resolvePlaybackCameraId(
             storeRef.current.animation.cameraCuts,
             storeRef.current.animation.currentTime,
-            storeRef.current.activeCameraId,
           )
         : storeRef.current.activeCameraId;
       const playbackCamera = sceneCameras.find(
@@ -1839,6 +2029,7 @@ export function Viewport3D() {
         updateViewportLabels();
       }
       syncObjectBounds();
+      syncGroupBounds();
 
       animationFrame = requestAnimationFrame(animate);
     };
@@ -1857,9 +2048,9 @@ export function Viewport3D() {
     window.addEventListener("animation-export-request", handleAnimationExport);
     window.addEventListener("beforeunload", handleBeforeUnload);
     window.addEventListener("keydown", handleKeyDown);
-    renderer.domElement.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keyup", handleKeyUp);
+    renderer.domElement.addEventListener("pointerdown", handlePointerDown, true);
     renderer.domElement.addEventListener("pointerup", handleViewportSelection);
-    renderer.domElement.addEventListener("contextmenu", handleContextMenu);
     storeRef.current = useProjectStore.getState();
     handleProjectRuntimeSync();
     syncTransformControls();
@@ -1886,9 +2077,9 @@ export function Viewport3D() {
       window.removeEventListener("animation-export-request", handleAnimationExport);
       window.removeEventListener("beforeunload", handleBeforeUnload);
       window.removeEventListener("keydown", handleKeyDown);
-      renderer.domElement.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keyup", handleKeyUp);
+      renderer.domElement.removeEventListener("pointerdown", handlePointerDown, true);
       renderer.domElement.removeEventListener("pointerup", handleViewportSelection);
-      renderer.domElement.removeEventListener("contextmenu", handleContextMenu);
       transformControls.detach();
       transformControls.dispose();
       Array.from(objectBoundsHelpers.values()).forEach((helper) => {
@@ -1897,6 +2088,12 @@ export function Viewport3D() {
         (helper.material as THREE.Material).dispose();
       });
       objectBoundsHelpers.clear();
+      Array.from(groupBoundsHelpers.values()).forEach((helper) => {
+        helper.parent?.remove(helper);
+        helper.geometry.dispose();
+        (helper.material as THREE.Material).dispose();
+      });
+      groupBoundsHelpers.clear();
       Array.from(cameraRigs.values()).forEach(disposeCameraRig);
       cameraRigs.clear();
       skeletonRegistry.disposeAll();
@@ -1911,74 +2108,6 @@ export function Viewport3D() {
 
   return (
     <div className="viewport-stage" ref={containerRef}>
-      {contextMenu ? (
-        <div
-          className="viewport-context-menu"
-          style={{ left: contextMenu.x, top: contextMenu.y }}
-        >
-          <button
-            disabled={!hasSelection}
-            type="button"
-            onClick={() => {
-              useProjectStore.getState().copySelection();
-              setContextMenu(null);
-            }}
-          >
-            复制
-          </button>
-          <button
-            disabled={!hasClipboard}
-            type="button"
-            onClick={() => {
-              useProjectStore.getState().pasteClipboard();
-              setContextMenu(null);
-            }}
-          >
-            粘贴
-          </button>
-          <button
-            disabled={!canGroup}
-            type="button"
-            onClick={() => {
-              useProjectStore.getState().groupSelection();
-              setContextMenu(null);
-            }}
-          >
-            成组
-          </button>
-          <button
-            disabled={!canUngroup}
-            type="button"
-            onClick={() => {
-              useProjectStore.getState().ungroupSelection();
-              setContextMenu(null);
-            }}
-          >
-            解组
-          </button>
-          <button
-            disabled={!hasSelection}
-            type="button"
-            onClick={() => {
-              useProjectStore.getState().snapSelectionToGround();
-              setContextMenu(null);
-            }}
-          >
-            吸附到地面
-          </button>
-          <button
-            className="danger-action"
-            disabled={!hasSelection}
-            type="button"
-            onClick={() => {
-              useProjectStore.getState().removeSelection();
-              setContextMenu(null);
-            }}
-          >
-            删除
-          </button>
-        </div>
-      ) : null}
       <div className="viewport-hud">
         <div className="orientation-widget">
           <span className="orientation-origin" />
@@ -2015,7 +2144,9 @@ export function Viewport3D() {
       <div className="viewport-label-layer">
         {viewportLabels.map((item) => (
           <div
-            className={`viewport-label ${item.active ? "is-active" : ""}`}
+            className={`viewport-label ${item.active ? "is-active" : ""} ${
+              item.kind === "group" ? "is-group" : ""
+            }`}
             key={item.id}
             style={{
               transform: `translate(${item.x}px, ${item.y}px) translate(-50%, -100%)`,
