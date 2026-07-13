@@ -269,24 +269,26 @@ h2 {
 
 .asset-list {
   display: grid;
-  gap: 4px;
+  gap: 3px;
 }
 
 .asset-group {
   display: grid;
-  gap: 3px;
+  gap: 2px;
+  padding: 1px 0 3px;
 }
 
 .asset-item {
+  position: relative;
   display: grid;
-  grid-template-columns: 16px minmax(0, 1fr) 96px;
+  grid-template-columns: 20px 22px minmax(0, 1fr);
   align-items: center;
-  gap: 10px;
+  gap: 7px;
   width: 100%;
   min-width: 0;
-  min-height: 36px;
+  min-height: 34px;
   border-radius: 8px;
-  padding: 0 9px;
+  padding: 0 8px;
   color: #e4e4e4;
   text-align: left;
   background: transparent;
@@ -295,68 +297,79 @@ h2 {
 }
 
 .asset-item.group-item {
-  grid-template-columns: 40px minmax(0, 1fr) 96px;
-  color: #f2f2f2;
-  background: rgba(255, 255, 255, 0.03);
+  color: #eeeeee;
+  background: transparent;
+  box-shadow: none;
 }
 
 .asset-item.has-no-actions {
-  grid-template-columns: 16px minmax(0, 1fr);
+  grid-template-columns: 20px 22px minmax(0, 1fr);
 }
 
-.group-leading {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-}
-
-.group-leading button {
+.asset-row-control,
+.asset-row-icon {
+  position: relative;
   display: grid;
-  width: 18px;
-  height: 22px;
+  min-width: 0;
+  height: 100%;
+  place-items: center;
+}
+
+.asset-row-icon {
+  color: #d8d8d8;
+}
+
+.group-folder-icon {
+  color: #eeeeee;
+}
+
+.group-collapse-button {
+  display: grid;
+  width: 20px;
+  height: 24px;
+  border-radius: 6px;
   place-items: center;
   color: #bcbcbc;
   background: transparent;
   cursor: pointer;
 }
 
-.group-leading button:hover {
+.group-collapse-button:hover {
   color: #f4f4f4;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.group-collapse-button:focus-visible {
+  outline: 1px solid #6ea8ff;
+  outline-offset: 1px;
 }
 
 .asset-item.is-child {
-  margin-left: 12px;
-  width: calc(100% - 12px);
+  margin-left: 28px;
+  width: calc(100% - 28px);
+  min-height: 32px;
+  border-radius: 7px;
+  padding-left: 8px;
+  color: #d9d9d9;
+  background: transparent;
 }
 
-.asset-item > svg {
-  flex: 0 0 auto;
+.asset-item.is-child .asset-row-icon {
+  color: #cfcfcf;
 }
 
 .asset-item-label {
   min-width: 0;
   overflow: hidden;
+  color: inherit;
+  font-size: 14px;
+  line-height: 1;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .group-item-label {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.group-item-label > span:first-child {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.group-member-count {
-  flex: 0 0 auto;
-  color: #969696;
-  font-size: 12px;
+  display: block;
 }
 
 .asset-item-label-input {
@@ -395,7 +408,17 @@ h2 {
 
 .asset-item.is-active,
 .asset-item:hover {
-  background: #2b2b2b;
+  background: rgba(255, 255, 255, 0.055);
+}
+
+.asset-item.group-item.is-active,
+.asset-item.group-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.asset-item.is-child.is-active,
+.asset-item.is-child:hover {
+  background: rgba(255, 255, 255, 0.055);
 }
 
 .asset-empty {
@@ -410,18 +433,24 @@ h2 {
 }
 
 .row-actions {
+  position: absolute;
+  top: calc(50% - 11px);
+  right: 5px;
   display: flex;
   align-items: center;
-  gap: 2px;
-  width: 96px;
-  min-width: 96px;
+  gap: 1px;
+  width: auto;
+  min-width: 0;
   justify-content: flex-end;
+  padding-left: 18px;
+  background: linear-gradient(to right, rgba(42, 42, 42, 0), rgba(42, 42, 42, 0.96) 18px);
   opacity: 0;
   transition: opacity 120ms ease;
 }
 
 .asset-item:hover .row-actions,
-.asset-item.is-active .row-actions {
+.asset-item.is-active .row-actions,
+.row-actions.is-menu-open {
   opacity: 1;
 }
 
@@ -448,13 +477,11 @@ h2 {
 }
 
 .group-move-menu {
-  position: absolute;
-  z-index: 20;
-  top: -4px;
-  left: calc(100% + 10px);
-  right: auto;
+  position: fixed;
+  z-index: 90;
   display: grid;
   min-width: 160px;
+  max-width: min(220px, calc(100vw - 16px));
   border: 1px solid #4b4b4b;
   border-radius: 7px;
   padding: 4px;
@@ -474,8 +501,11 @@ h2 {
   height: 28px;
   border-radius: 5px;
   padding: 0 8px;
+  overflow: hidden;
   color: #e4e4e4;
   text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   background: transparent;
 }
 

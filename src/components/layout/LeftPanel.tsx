@@ -6,9 +6,7 @@ import {
   Crosshair,
   Eye,
   EyeOff,
-  Folder,
   FolderInput,
-  FolderOpen,
   Lock,
   Plus,
   Search,
@@ -244,6 +242,38 @@ export function LeftPanel() {
     setContextGroupMoveOpen(false);
     setAssetContextMenu(undefined);
   };
+
+  const GroupNodeIcon = ({ size = 17 }: { size?: number }) => (
+    <svg
+      aria-hidden="true"
+      fill="none"
+      height={size}
+      viewBox="0 0 18 18"
+      width={size}
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <rect
+        height="10"
+        rx="1.8"
+        stroke="currentColor"
+        strokeDasharray="2 2"
+        strokeWidth="1.5"
+        width="10"
+        x="3"
+        y="3"
+      />
+      <rect
+        height="7"
+        rx="1.4"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        width="7"
+        x="8"
+        y="8"
+      />
+    </svg>
+  );
+
   const runCopy = () => {
     const result = copySelection();
     if (!result.ok) {
@@ -312,23 +342,23 @@ export function LeftPanel() {
                 }}
                 onContextMenu={(event) => handleGroupContextMenu(group.id, event)}
               >
-                <div className="group-leading">
-                  <button
-                    aria-label={group.collapsed ? "展开组" : "收起组"}
-                    title={group.collapsed ? "展开组" : "收起组"}
-                    type="button"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      toggleGroupCollapsed(group.id);
-                    }}
-                  >
-                    {group.collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-                  </button>
-                  {group.collapsed ? <Folder size={16} /> : <FolderOpen size={16} />}
-                </div>
+                <button
+                  aria-label={group.collapsed ? "展开组" : "收起组"}
+                  className="asset-row-control group-collapse-button"
+                  title={group.collapsed ? "展开组" : "收起组"}
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    toggleGroupCollapsed(group.id);
+                  }}
+                >
+                  {group.collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                </button>
+                <span className="asset-row-icon group-folder-icon">
+                  <GroupNodeIcon size={18} />
+                </span>
                 <span className="asset-item-label group-item-label" title={group.name}>
-                  <span>{group.name}</span>
-                  <span className="group-member-count">（{group.objectIds.length}）</span>
+                  {group.name}
                 </span>
                 <div className="row-actions">
                   <button
@@ -440,8 +470,11 @@ export function LeftPanel() {
               onClick={() => setActiveCamera(camera.id)}
               onContextMenu={(event) => handleCameraContextMenu(camera.id, event)}
             >
-              <Camera size={16} />
-              <span className="asset-item-label">{camera.name}</span>
+              <span className="asset-row-control" aria-hidden="true" />
+              <span className="asset-row-icon">
+                <Camera size={16} />
+              </span>
+              <span className="asset-item-label" title={camera.name}>{camera.name}</span>
               <div className="row-actions">
                 <button
                   title={camera.visible ? "隐藏" : "显示"}
@@ -702,6 +735,7 @@ function ObjectRow({
   const [nameDraft, setNameDraft] = useState(object.name);
   const nameEditCommittedRef = useRef(false);
   const [groupMenuOpen, setGroupMenuOpen] = useState(false);
+  const [groupMenuPosition, setGroupMenuPosition] = useState({ x: 0, y: 0 });
   const groupMenuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -744,7 +778,10 @@ function ObjectRow({
       }}
       onContextMenu={onContextMenu}
     >
-      {object.type === "character" ? <UserRound size={16} /> : <Box size={16} />}
+      <span className="asset-row-control object-tree-guide" aria-hidden="true" />
+      <span className="asset-row-icon">
+        {object.type === "character" ? <UserRound size={16} /> : <Box size={16} />}
+      </span>
       {editingName ? (
         <input
           aria-label="对象名称"
@@ -772,6 +809,7 @@ function ObjectRow({
       ) : (
         <span
           className="asset-item-label"
+          title={object.name}
           onDoubleClick={(event) => {
             event.stopPropagation();
             nameEditCommittedRef.current = false;
@@ -783,91 +821,100 @@ function ObjectRow({
         </span>
       )}
       {!hideQuickActions ? (
-        <div className="row-actions">
-        <div className="row-action-menu" ref={groupMenuRef}>
-          <button
-            aria-expanded={groupMenuOpen}
-            title="移至分组"
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation();
-              setGroupMenuOpen((current) => !current);
-            }}
-          >
-            <FolderInput size={13} />
-          </button>
-          {groupMenuOpen ? (
-            <div
-              className="group-move-menu"
-              role="menu"
-              onClick={(event) => event.stopPropagation()}
+        <div className={`row-actions ${groupMenuOpen ? "is-menu-open" : ""}`}>
+          <div className="row-action-menu" ref={groupMenuRef}>
+            <button
+              aria-expanded={groupMenuOpen}
+              title="移至分组"
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                const rect = event.currentTarget.getBoundingClientRect();
+                setGroupMenuPosition({
+                  x: Math.min(rect.right + 8, window.innerWidth - 172),
+                  y: Math.min(rect.top - 4, window.innerHeight - 220),
+                });
+                setGroupMenuOpen((current) => !current);
+              }}
             >
-              <div className="group-move-menu-title">移至分组</div>
-              {groups.filter((group) => group.id !== currentGroupId).map((group) => (
-                <button
-                  key={group.id}
-                  role="menuitem"
-                  type="button"
-                  onClick={() => {
-                    onMoveToGroup(object.id, group.id);
-                    setGroupMenuOpen(false);
-                  }}
-                >
-                  {group.name}
-                </button>
-              ))}
-              {!groups.some((group) => group.id !== currentGroupId) ? (
-                <div className="group-move-menu-empty">暂无可选分组</div>
-              ) : null}
-              {currentGroupId ? (
-                <>
-                  <div className="group-move-menu-separator" />
+              <FolderInput size={13} />
+            </button>
+            {groupMenuOpen ? (
+              <div
+                className="group-move-menu"
+                role="menu"
+                style={{
+                  left: groupMenuPosition.x,
+                  top: Math.max(8, groupMenuPosition.y),
+                }}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="group-move-menu-title">移至分组</div>
+                {groups.filter((group) => group.id !== currentGroupId).map((group) => (
                   <button
-                    className="group-move-menu-remove"
+                    key={group.id}
                     role="menuitem"
                     type="button"
                     onClick={() => {
-                      onMoveToGroup(object.id);
+                      onMoveToGroup(object.id, group.id);
                       setGroupMenuOpen(false);
                     }}
                   >
-                    移出当前分组
+                    {group.name}
                   </button>
-                </>
-              ) : null}
-            </div>
-          ) : null}
-        </div>
-        <button
-          title={object.visible ? "隐藏" : "显示"}
-          type="button"
-          onClick={(event) => {
-            event.stopPropagation();
-            onToggleVisible(object.id);
-          }}
-        >
-          {object.visible ? <Eye size={13} /> : <EyeOff size={13} />}
-        </button>
-        <button
-          title={object.locked ? "解锁" : "锁定"}
-          type="button"
-          onClick={(event) => {
-            event.stopPropagation();
-            onToggleLocked(object.id);
-          }}
-        >
-          {object.locked ? <Lock size={13} /> : <Unlock size={13} />}
-        </button>
-        <button
-          title="删除"
-          type="button"
-          onClick={(event) => {
-            event.stopPropagation();
-            onRemove(object.id);
-          }}
-        >
-          <Trash2 size={13} />
-        </button>
+                ))}
+                {!groups.some((group) => group.id !== currentGroupId) ? (
+                  <div className="group-move-menu-empty">暂无可选分组</div>
+                ) : null}
+                {currentGroupId ? (
+                  <>
+                    <div className="group-move-menu-separator" />
+                    <button
+                      className="group-move-menu-remove"
+                      role="menuitem"
+                      type="button"
+                      onClick={() => {
+                        onMoveToGroup(object.id);
+                        setGroupMenuOpen(false);
+                      }}
+                    >
+                      移出当前分组
+                    </button>
+                  </>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+          <button
+            title={object.visible ? "隐藏" : "显示"}
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              onToggleVisible(object.id);
+            }}
+          >
+            {object.visible ? <Eye size={13} /> : <EyeOff size={13} />}
+          </button>
+          <button
+            title={object.locked ? "解锁" : "锁定"}
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              onToggleLocked(object.id);
+            }}
+          >
+            {object.locked ? <Lock size={13} /> : <Unlock size={13} />}
+          </button>
+          <button
+            title="删除"
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              onRemove(object.id);
+            }}
+          >
+            <Trash2 size={13} />
+          </button>
         </div>
       ) : null}
     </div>

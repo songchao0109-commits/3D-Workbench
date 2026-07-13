@@ -75,6 +75,7 @@ const defaultOrientationAxes: OrientationAxis[] = [
 ];
 
 const pivotPosition = new THREE.Vector3();
+const pivotBounds = new THREE.Box3();
 const pivotMatrixPrevious = new THREE.Matrix4();
 const pivotMatrixNext = new THREE.Matrix4();
 const pivotDeltaMatrix = new THREE.Matrix4();
@@ -1224,11 +1225,19 @@ export function Viewport3D() {
           transformControls.detach();
           return;
         }
-        pivotPosition.set(0, 0, 0);
+        pivotBounds.makeEmpty();
         selectableObjects.forEach(({ runtime }) => {
-          pivotPosition.add(runtime.position);
+          pivotBounds.expandByObject(runtime);
         });
-        pivotPosition.multiplyScalar(1 / selectableObjects.length);
+        if (pivotBounds.isEmpty()) {
+          pivotPosition.set(0, 0, 0);
+          selectableObjects.forEach(({ runtime }) => {
+            pivotPosition.add(runtime.position);
+          });
+          pivotPosition.multiplyScalar(1 / selectableObjects.length);
+        } else {
+          pivotBounds.getCenter(pivotPosition);
+        }
         if (transformControls.object !== selectionPivot || !draggingRef.current) {
           selectionPivot.position.copy(pivotPosition);
           selectionPivot.rotation.set(0, 0, 0);
