@@ -159,7 +159,6 @@ type ProjectStore = ProjectState & {
   distributeSelection: (axis: "x" | "z") => void;
   undo: () => void;
   redo: () => void;
-  replaceProject: (project: ProjectState) => void;
   updateObjectMaterial: (
     objectId: string,
     materialId: string,
@@ -172,6 +171,7 @@ type ProjectStore = ProjectState & {
   setAnimationTime: (time: number) => void;
   setAnimationPlaying: (playing: boolean) => void;
   toggleAnimationPlayback: () => void;
+  toggleAnimationLoop: () => void;
   setAnimationAutoKeyEnabled: (enabled: boolean) => void;
   setAnimationAutoKeyMode: (mode: ProjectState["animation"]["autoKeyMode"]) => void;
   setAnimationDuration: (duration: number) => void;
@@ -235,6 +235,39 @@ function applyAnimationState(state: ProjectState, time: number) {
       currentTime: nextTime,
     },
   };
+}
+
+const PLAYBACK_RANGE_EPSILON = 0.0001;
+
+function getAnimationPlaybackRange(animation: ProjectState["animation"]) {
+  const duration = clampAnimationDuration(animation.duration);
+  const startTime =
+    animation.inPointTime === undefined
+      ? 0
+      : clampAnimationTime(animation.inPointTime, duration, animation.fps);
+  const endTime =
+    animation.outPointTime === undefined
+      ? duration
+      : clampAnimationTime(animation.outPointTime, duration, animation.fps);
+
+  return {
+    startTime,
+    endTime,
+  };
+}
+
+function getPlaybackStartTime(animation: ProjectState["animation"]) {
+  const { startTime, endTime } = getAnimationPlaybackRange(animation);
+  const currentTime = clampAnimationTime(
+    animation.currentTime,
+    animation.duration,
+    animation.fps,
+  );
+  const outsideRange =
+    currentTime < startTime - PLAYBACK_RANGE_EPSILON ||
+    currentTime >= endTime - PLAYBACK_RANGE_EPSILON;
+
+  return outsideRange ? startTime : currentTime;
 }
 
 function captureManualSelectionKeyframes(state: ProjectState) {
@@ -546,6 +579,33 @@ function withHistory(
       future: [],
       limit: state.history.limit,
     },
+  };
+}
+
+function removeAnimationTargets(
+  animation: ProjectState["animation"],
+  options: {
+    objectIds?: Set<string>;
+    cameraIds?: Set<string>;
+  },
+): ProjectState["animation"] {
+  const objectIds = options.objectIds ?? new Set<string>();
+  const cameraIds = options.cameraIds ?? new Set<string>();
+  if (!objectIds.size && !cameraIds.size) {
+    return animation;
+  }
+
+  return {
+    ...animation,
+    bindings: animation.bindings.filter((binding) => {
+      if (binding.targetType === "object") {
+        return !objectIds.has(binding.targetId);
+      }
+      return !cameraIds.has(binding.targetId);
+    }),
+    cameraCuts: cameraIds.size
+      ? animation.cameraCuts.filter((cut) => !cameraIds.has(cut.cameraId))
+      : animation.cameraCuts,
   };
 }
 
@@ -1097,6 +1157,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         selectedObjectIds: [],
         cameraPreviewActive:
           state.activeCameraId === cameraId ? false : state.cameraPreviewActive,
+        animation: removeAnimationTargets(state.animation, {
+          cameraIds: new Set([cameraId]),
+        }),
       });
     }),
   setObjectRigMode: (objectId, mode) =>
@@ -1405,6 +1468,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         assets: removeUnreferencedAssets(state, objects, removedAssetIds),
         objects,
         groups,
+        animation: removeAnimationTargets(state.animation, {
+          objectIds: new Set([objectId]),
+        }),
         selectedObjectIds: state.selectedObjectIds.filter((id) => id !== objectId),
         activeObjectId:
           state.activeObjectId === objectId ? undefined : state.activeObjectId,
@@ -1638,6 +1704,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         assets: removeUnreferencedAssets(state, objects, removedAssetIds),
         objects,
         groups,
+        animation: removeAnimationTargets(state.animation, {
+          objectIds: selectedSet,
+        }),
         selectedObjectIds: [],
         activeObjectId: undefined,
         activeGroupId: undefined,
@@ -1818,6 +1887,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         assets: removeUnreferencedAssets(state, objects, removedAssetIds),
         objects,
         groups: state.groups.filter((item) => item.id !== groupId),
+        animation: removeAnimationTargets(state.animation, {
+          objectIds,
+        }),
         selectedObjectIds: [],
         activeObjectId: undefined,
         activeGroupId: undefined,
@@ -2076,26 +2148,6 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     set(restoreSnapshot(next, history));
     window.dispatchEvent(new CustomEvent("project-runtime-sync-request"));
   },
-  replaceProject: (project) =>
-    {
-      set((state) =>
-        withHistory(state, {
-          ...cloneProjectState({
-            ...defaultProject,
-            ...project,
-            selectedObjectIds: normalizeObjectIds(
-              project.selectedObjectIds ?? [],
-              project.objects,
-            ),
-            groups: project.groups ?? [],
-            cameraPreviewActive: false,
-          }),
-          clipboard: undefined,
-          historyDraft: undefined,
-        }),
-      );
-      window.dispatchEvent(new CustomEvent("project-runtime-sync-request"));
-    },
   updateObjectMaterial: (objectId, materialId, updates) =>
     set((state) => {
       const textureAssetsToRemove = new Set<string>();
@@ -2169,10 +2221,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     set((state) => ({
       animation: {
         ...state.animation,
-        currentTime:
-          playing && state.animation.currentTime >= state.animation.duration - 0.0001
-            ? 0
-            : state.animation.currentTime,
+        currentTime: playing
+          ? getPlaybackStartTime(state.animation)
+          : state.animation.currentTime,
         isPlaying: playing,
       },
     })),
@@ -2182,14 +2233,20 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       return {
         animation: {
           ...state.animation,
-          currentTime:
-            nextPlaying && state.animation.currentTime >= state.animation.duration - 0.0001
-              ? 0
-              : state.animation.currentTime,
+          currentTime: nextPlaying
+            ? getPlaybackStartTime(state.animation)
+            : state.animation.currentTime,
           isPlaying: nextPlaying,
         },
       };
     }),
+  toggleAnimationLoop: () =>
+    set((state) => ({
+      animation: {
+        ...state.animation,
+        loop: !state.animation.loop,
+      },
+    })),
   setAnimationAutoKeyEnabled: (enabled) =>
     set((state) => ({
       animation: {
@@ -2304,16 +2361,36 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       if (!state.animation.isPlaying) {
         return state;
       }
-      const duration = clampAnimationDuration(state.animation.duration);
-      const rawNextTime = state.animation.currentTime + Math.max(0, deltaSeconds);
+      const { startTime, endTime } = getAnimationPlaybackRange(state.animation);
+      const rangeDuration = endTime - startTime;
+      if (rangeDuration <= PLAYBACK_RANGE_EPSILON) {
+        return {
+          animation: {
+            ...state.animation,
+            currentTime: endTime,
+            isPlaying: false,
+          },
+        };
+      }
+      const currentTime = clampAnimationTime(
+        state.animation.currentTime,
+        state.animation.duration,
+        state.animation.fps,
+      );
+      const rangeCurrentTime =
+        currentTime < startTime - PLAYBACK_RANGE_EPSILON ||
+        currentTime > endTime + PLAYBACK_RANGE_EPSILON
+          ? startTime
+          : currentTime;
+      const rawNextTime = rangeCurrentTime + Math.max(0, deltaSeconds);
       const shouldLoop = state.animation.loop;
       const nextTime =
-        rawNextTime > duration
+        rawNextTime > endTime
           ? shouldLoop
-            ? rawNextTime % duration
-            : duration
+            ? startTime + ((rawNextTime - startTime) % rangeDuration)
+            : endTime
           : rawNextTime;
-      if (!shouldLoop && rawNextTime >= duration) {
+      if (!shouldLoop && rawNextTime >= endTime) {
         return {
           animation: {
             ...state.animation,

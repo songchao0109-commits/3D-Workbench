@@ -233,7 +233,6 @@ export function CameraInspector() {
       ),
     [camera?.id, camera?.targetRefId, camera?.targetRefType, cameras, objects, targetCandidates],
   );
-
   useEffect(() => {
     if (camera?.mode === "lookAt" && camera.targetMode === "asset") {
       setTargetSearch(selectedTargetCandidate?.label ?? "");

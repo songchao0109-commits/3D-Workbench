@@ -182,10 +182,13 @@ export function resolvePlaybackCameraId(
   fallbackCameraId?: string,
 ) {
   const ordered = sortCameraCuts(cameraCuts);
+  if (!ordered.length) {
+    return fallbackCameraId;
+  }
   const matched = ordered
     .filter((cut) => getCameraCutStart(cut) <= time + 0.0001)
     .at(-1);
-  return matched?.cameraId ?? fallbackCameraId;
+  return matched?.cameraId ?? ordered[0].cameraId;
 }
 
 function sampleNumberChannel(
