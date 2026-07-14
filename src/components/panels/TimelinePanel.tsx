@@ -10,6 +10,7 @@ import {
   Pause,
   Play,
   Plus,
+  Repeat,
   SkipBack,
   SkipForward,
   Trash2,
@@ -154,6 +155,46 @@ function InsertKeyframeIcon({ size = 16 }: { size?: number }) {
   );
 }
 
+function PlayOnceIcon({ size = 17 }: { size?: number }) {
+  return (
+    <svg
+      aria-hidden="true"
+      fill="none"
+      height={size}
+      viewBox="0 0 24 24"
+      width={size}
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <path
+        d="M4 6.5h15M4 17.5h14"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="2.25"
+      />
+      <path
+        d="M16 13.5l4 4-4 4"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="2.25"
+      />
+      <path
+        d="M11.5 10.5V8.5h-1"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="2"
+      />
+      <path
+        d="M11.5 8.5v4"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="2"
+      />
+    </svg>
+  );
+}
+
 function isEditableTarget(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) {
     return false;
@@ -239,6 +280,7 @@ export function TimelinePanel({
   const toggleAnimationPlayback = useProjectStore(
     (state) => state.toggleAnimationPlayback,
   );
+  const toggleAnimationLoop = useProjectStore((state) => state.toggleAnimationLoop);
   const setAnimationAutoKeyEnabled = useProjectStore(
     (state) => state.setAnimationAutoKeyEnabled,
   );
@@ -659,6 +701,11 @@ export function TimelinePanel({
     clearAnimationOutPoint();
     setFeedback("已清除出点");
   }, [clearAnimationOutPoint]);
+
+  const handleTogglePlaybackMode = () => {
+    toggleAnimationLoop();
+    setFeedback(animation.loop ? "播放模式：只播放一次" : "播放模式：循环播放");
+  };
 
   const updateRangePointAtClientX = useCallback((
     type: "in" | "out",
@@ -1740,6 +1787,20 @@ export function TimelinePanel({
             <div className="timeline-toolbar-main">
               <div className="timeline-playback-group">
                 <button
+                  aria-label="收起时间线"
+                  className="timeline-icon-button timeline-collapse-button"
+                  data-tooltip="收起时间线"
+                  title="收起时间线"
+                  type="button"
+                  onBlur={hideToolbarTooltip}
+                  onClick={onToggle}
+                  onFocus={(event) => showToolbarTooltip(event, "收起时间线")}
+                  onMouseEnter={(event) => showToolbarTooltip(event, "收起时间线")}
+                  onMouseLeave={hideToolbarTooltip}
+                >
+                  <ChevronDown size={16} />
+                </button>
+                <button
                   aria-label={animation.isPlaying ? "暂停" : "播放"}
                   className="timeline-icon-button"
                   data-tooltip={animation.isPlaying ? "暂停" : "播放"}
@@ -1760,6 +1821,32 @@ export function TimelinePanel({
                   }}
                 >
                   {animation.isPlaying ? <Pause size={19} /> : <Play size={19} />}
+                </button>
+                <button
+                  aria-label={`播放模式：${animation.loop ? "循环播放" : "只播放一次"}`}
+                  className={`timeline-icon-button timeline-loop-button ${
+                    animation.loop ? "is-active" : ""
+                  }`}
+                  data-tooltip={animation.loop ? "循环播放" : "只播放一次"}
+                  title={animation.loop ? "循环播放" : "只播放一次"}
+                  type="button"
+                  onBlur={hideToolbarTooltip}
+                  onClick={handleTogglePlaybackMode}
+                  onFocus={(event) =>
+                    showToolbarTooltip(
+                      event,
+                      animation.loop ? "循环播放" : "只播放一次",
+                    )
+                  }
+                  onMouseEnter={(event) =>
+                    showToolbarTooltip(
+                      event,
+                      animation.loop ? "循环播放" : "只播放一次",
+                    )
+                  }
+                  onMouseLeave={hideToolbarTooltip}
+                >
+                  {animation.loop ? <Repeat size={17} /> : <PlayOnceIcon size={17} />}
                 </button>
                 <button
                   aria-label="上一关键帧"
@@ -1874,20 +1961,6 @@ export function TimelinePanel({
                 </button>
               </div>
               <div className="timeline-toolbar-actions">
-                <button
-                  aria-label="收起时间线"
-                  className="timeline-icon-button timeline-collapse-button"
-                  data-tooltip="收起时间线"
-                  title="收起时间线"
-                  type="button"
-                  onBlur={hideToolbarTooltip}
-                  onClick={onToggle}
-                  onFocus={(event) => showToolbarTooltip(event, "收起时间线")}
-                  onMouseEnter={(event) => showToolbarTooltip(event, "收起时间线")}
-                  onMouseLeave={hideToolbarTooltip}
-                >
-                  <ChevronDown size={16} />
-                </button>
                 <button
                   aria-label="生成视频"
                   className="timeline-generate-button"

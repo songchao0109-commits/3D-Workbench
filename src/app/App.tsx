@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { emitAppFeedback } from "./appFeedback";
 import { BottomToolbar } from "../components/layout/BottomToolbar";
 import { LeftPanel } from "../components/layout/LeftPanel";
@@ -6,10 +6,7 @@ import { RightPanel } from "../components/layout/RightPanel";
 import { TimelinePanel } from "../components/panels/TimelinePanel";
 import { TopBar } from "../components/layout/TopBar";
 import { Viewport3D } from "../components/viewport/Viewport3D";
-import { parseProjectJson, serializeProject } from "../domain/projectSerialization";
 import { useProjectStore } from "../store/projectStore";
-
-const autosaveKey = "3d-workbench-autosave-v1";
 
 function isEditableTarget(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) {
@@ -22,45 +19,6 @@ export function App() {
   const [timelineExpanded, setTimelineExpanded] = useState(false);
   const [timelineHeight, setTimelineHeight] = useState(380);
   const isPlaying = useProjectStore((state) => state.animation.isPlaying);
-  const autosaveRestoreAttemptedRef = useRef(false);
-
-  useEffect(() => {
-    if (autosaveRestoreAttemptedRef.current) {
-      return;
-    }
-    autosaveRestoreAttemptedRef.current = true;
-    const saved = window.localStorage.getItem(autosaveKey);
-    if (saved && window.confirm("检测到自动保存的项目，是否恢复？")) {
-      try {
-        useProjectStore.getState().replaceProject(parseProjectJson(saved));
-        emitAppFeedback("已恢复自动保存项目");
-      } catch {
-        window.localStorage.removeItem(autosaveKey);
-        emitAppFeedback("自动保存恢复失败，已忽略损坏记录");
-      }
-    }
-  }, []);
-
-  useEffect(() => {
-    let timeoutId = 0;
-    const unsubscribe = useProjectStore.subscribe((state) => {
-      window.clearTimeout(timeoutId);
-      timeoutId = window.setTimeout(() => {
-        try {
-          window.localStorage.setItem(
-            autosaveKey,
-            serializeProject(state, { includeSnapshots: false }),
-          );
-        } catch {
-          emitAppFeedback("自动保存空间不足，本次未保存快照数据");
-        }
-      }, 600);
-    });
-    return () => {
-      window.clearTimeout(timeoutId);
-      unsubscribe();
-    };
-  }, []);
 
   useEffect(() => {
     const handleKeydown = (event: KeyboardEvent) => {

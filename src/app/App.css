@@ -662,7 +662,7 @@ h2 {
   pointer-events: none;
 }
 
-.viewport-hud button {
+.viewport-hud > button {
   height: 28px;
   border-radius: 8px;
   padding: 0 10px;
@@ -682,28 +682,32 @@ h2 {
 
 .orientation-widget {
   position: relative;
-  width: 54px;
-  height: 54px;
+  width: 58px;
+  height: 58px;
   border-radius: 50%;
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  pointer-events: none;
+  border: 1px solid rgba(255, 255, 255, 0.07);
   background:
-    radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.1), transparent 38%),
-    #1d1d1d;
+    radial-gradient(circle at 35% 28%, rgba(255, 255, 255, 0.18), transparent 34%),
+    radial-gradient(circle at 52% 56%, rgba(255, 255, 255, 0.06), transparent 50%),
+    rgba(70, 70, 70, 0.34);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.06),
-    0 8px 18px rgba(0, 0, 0, 0.28);
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    inset 0 -8px 18px rgba(0, 0, 0, 0.08),
+    0 8px 16px rgba(0, 0, 0, 0.2);
+  backdrop-filter: blur(1px);
 }
 
 .orientation-origin {
   position: absolute;
   left: 50%;
   top: 50%;
-  width: 5px;
-  height: 5px;
+  width: 4px;
+  height: 4px;
   border-radius: 50%;
-  background: #ededed;
-  box-shadow: 0 0 0 2px rgba(237, 237, 237, 0.12);
+  background: rgba(22, 22, 22, 0.38);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.13);
   transform: translate(-50%, -50%);
 }
 
@@ -722,37 +726,78 @@ h2 {
   height: 2px;
   border-radius: 999px;
   background: var(--axis-color);
-  transform: rotate(var(--axis-angle));
+  opacity: 0.9;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.15),
+    0 1px 2px rgba(0, 0, 0, 0.14);
+  transform: translateY(-50%) rotate(var(--axis-angle));
   transform-origin: left center;
 }
 
-.orientation-axis-tip {
+.viewport-hud .orientation-axis-tip {
+  appearance: none;
+  -webkit-appearance: none;
   position: absolute;
-  left: calc(50% + var(--axis-x));
-  top: calc(50% + var(--axis-y));
+  left: calc(50% + var(--axis-tip-x));
+  top: calc(50% + var(--axis-tip-y));
   display: grid;
-  width: 14px;
-  height: 14px;
+  width: 18px;
+  height: 18px;
+  border: 0;
   border-radius: 50%;
+  padding: 0;
   place-items: center;
-  color: #050505;
+  color: rgba(8, 8, 8, 0.9);
   background: var(--axis-color);
-  font-size: 9px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.26),
+    inset 0 -1px 2px rgba(0, 0, 0, 0.11),
+    0 2px 5px rgba(0, 0, 0, 0.2);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 10px;
   font-weight: 800;
   line-height: 1;
+  pointer-events: auto;
+  text-align: center;
   transform: translate(-50%, -50%);
+  transition:
+    box-shadow 0.15s ease,
+    filter 0.15s ease,
+    transform 0.15s ease;
+}
+
+.viewport-hud .orientation-axis-tip:hover {
+  filter: brightness(1.1);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.3),
+    inset 0 -1px 2px rgba(0, 0, 0, 0.12),
+    0 3px 7px rgba(0, 0, 0, 0.26);
+  transform: translate(-50%, -50%) scale(1.07);
+}
+
+.viewport-hud .orientation-axis-tip:active {
+  filter: brightness(1.02);
+  transform: translate(-50%, -50%) scale(0.96);
+}
+
+.viewport-hud .orientation-axis-tip:focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 2px rgba(255, 255, 255, 0.86),
+    0 0 0 4px rgba(0, 0, 0, 0.42);
 }
 
 .orientation-axis-x {
-  --axis-color: #ff3b30;
+  --axis-color: #ff4368;
 }
 
 .orientation-axis-y {
-  --axis-color: #36d329;
+  --axis-color: #7ed321;
 }
 
 .orientation-axis-z {
-  --axis-color: #2288ff;
+  --axis-color: #2c8ee8;
 }
 
 .bottom-toolbar {
@@ -1052,6 +1097,15 @@ h2 {
 .timeline-icon-button.timeline-auto-key-button.is-active svg {
   fill: #ff5b5b;
   color: #ff5b5b;
+}
+
+.timeline-icon-button.timeline-loop-button.is-active {
+  color: #fff;
+  background: #2f5145;
+}
+
+.timeline-icon-button.timeline-loop-button.is-active:hover {
+  background: #376655;
 }
 
 .timeline-toolbar-left {

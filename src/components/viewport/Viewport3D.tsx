@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import * as THREE from "three";
 import { emitAppFeedback } from "../../app/appFeedback";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
@@ -68,11 +74,42 @@ type OrientationAxis = {
   depth: number;
 };
 
+type OrientationAxisId = OrientationAxis["id"];
+
+type OrientationAxisRequestDetail = {
+  axisId: OrientationAxisId;
+  sign: 1 | -1;
+};
+
+type OrientationPointerState = {
+  axisId: OrientationAxisId;
+  pointerId: number;
+  pointerType: string;
+  isPrimary: boolean;
+  startX: number;
+  startY: number;
+  lastX: number;
+  lastY: number;
+  dragging: boolean;
+};
+
 const defaultOrientationAxes: OrientationAxis[] = [
-  { id: "x", label: "X", x: 18, y: 0, length: 18, angle: 0, depth: 0 },
-  { id: "y", label: "Y", x: 0, y: -18, length: 18, angle: -90, depth: 0 },
-  { id: "z", label: "Z", x: -13, y: 11, length: 17, angle: 140, depth: 0 },
+  { id: "x", label: "X", x: 19, y: 0, length: 19, angle: 0, depth: 0 },
+  { id: "y", label: "Y", x: 0, y: -19, length: 19, angle: -90, depth: 0 },
+  { id: "z", label: "Z", x: -13, y: 13, length: 18, angle: 135, depth: 0 },
 ];
+
+const orientationAxisViewLabels: Record<OrientationAxisId, string> = {
+  x: "切换到 YZ 平面视图",
+  y: "切换到 XZ 平面视图",
+  z: "切换到 XY 平面视图",
+};
+
+const orientationAxisVectors: Record<OrientationAxisId, THREE.Vector3> = {
+  x: new THREE.Vector3(1, 0, 0),
+  y: new THREE.Vector3(0, 1, 0),
+  z: new THREE.Vector3(0, 0, 1),
+};
 
 const pivotPosition = new THREE.Vector3();
 const pivotBounds = new THREE.Box3();
@@ -83,6 +120,10 @@ const objectMatrix = new THREE.Matrix4();
 const objectNextPosition = new THREE.Vector3();
 const objectNextQuaternion = new THREE.Quaternion();
 const objectNextScale = new THREE.Vector3();
+const axisViewDirection = new THREE.Vector3();
+const axisViewTarget = new THREE.Vector3();
+const axisViewUp = new THREE.Vector3();
+const orientationClickMoveThreshold = 5;
 
 function createRenderer(container: HTMLDivElement) {
   const renderer = new THREE.WebGLRenderer({
@@ -98,8 +139,10 @@ function createRenderer(container: HTMLDivElement) {
 
 export function Viewport3D() {
   const containerRef = useRef<HTMLDivElement>(null);
+  const rendererElementRef = useRef<HTMLCanvasElement | undefined>(undefined);
   const storeRef = useRef(useProjectStore.getState());
   const draggingRef = useRef(false);
+  const orientationPointerRef = useRef<OrientationPointerState | undefined>(undefined);
   const [viewportLabels, setViewportLabels] = useState<
     Array<{
       id: string;
@@ -142,6 +185,7 @@ export function Viewport3D() {
     camera.position.set(8, 5.2, 7.4);
 
     const renderer = createRenderer(container);
+    rendererElementRef.current = renderer.domElement;
     const previewRenderer = new THREE.WebGLRenderer({
       antialias: true,
       preserveDrawingBuffer: true,
@@ -180,6 +224,12 @@ export function Viewport3D() {
     let exportInProgress = false;
     let pointerDownPosition = { x: 0, y: 0 };
     let pendingAltDuplicate = false;
+    let snappedOrientationAxis:
+      | {
+          axisId: OrientationAxisId;
+          sign: 1 | -1;
+        }
+      | undefined;
     let altDuplicatePreview:
       | {
           originalObjectIds: string[];
@@ -244,6 +294,33 @@ export function Viewport3D() {
         orientationAxesRef.current = nextAxes;
         setOrientationAxes(nextAxes);
       }
+    };
+
+    const getAxisViewUp = (axisId: OrientationAxisId, sign: 1 | -1) => {
+      if (axisId === "y") {
+        return axisViewUp.set(0, 0, sign > 0 ? -1 : 1);
+      }
+      return axisViewUp.set(0, 1, 0);
+    };
+
+    const snapEditorCameraToAxis = (axisId: OrientationAxisId, sign: 1 | -1) => {
+      const state = useProjectStore.getState();
+      if (state.cameraPreviewActive || state.animation.isPlaying) {
+        return;
+      }
+
+      const axisVector = orientationAxisVectors[axisId];
+      axisViewTarget.copy(controls.target);
+      axisViewDirection.copy(camera.position).sub(axisViewTarget);
+      const distance = Math.max(axisViewDirection.length(), 4);
+
+      snappedOrientationAxis = { axisId, sign };
+      camera.up.copy(getAxisViewUp(axisId, sign));
+      camera.position.copy(axisViewTarget).addScaledVector(axisVector, distance * sign);
+      camera.lookAt(axisViewTarget);
+      controls.target.copy(axisViewTarget);
+      controls.update();
+      updateOrientationWidget();
     };
 
     const transformControls = new TransformControls(camera, renderer.domElement);
@@ -1753,11 +1830,18 @@ export function Viewport3D() {
       if (storeRef.current.cameraPreviewActive) {
         return;
       }
+      snappedOrientationAxis = undefined;
       camera.position.set(8, 5.2, 7.4);
+      camera.up.set(0, 1, 0);
       camera.fov = 45;
       camera.updateProjectionMatrix();
       controls.target.set(0, 0.8, 0);
       controls.update();
+    };
+
+    const handleOrientationAxisRequest = (event: Event) => {
+      const detail = (event as CustomEvent<OrientationAxisRequestDetail>).detail;
+      snapEditorCameraToAxis(detail.axisId, detail.sign);
     };
 
     const handleSnapshotExport = () => {
@@ -2053,6 +2137,7 @@ export function Viewport3D() {
     window.addEventListener("camera-create-from-view-request", handleCameraCreateFromView);
     window.addEventListener("panorama-import-request", handlePanoramaImport);
     window.addEventListener("viewport-reset-view-request", handleViewReset);
+    window.addEventListener("viewport-orientation-axis-request", handleOrientationAxisRequest);
     window.addEventListener("snapshot-export-request", handleSnapshotExport);
     window.addEventListener("animation-export-request", handleAnimationExport);
     window.addEventListener("beforeunload", handleBeforeUnload);
@@ -2082,6 +2167,10 @@ export function Viewport3D() {
       );
       window.removeEventListener("panorama-import-request", handlePanoramaImport);
       window.removeEventListener("viewport-reset-view-request", handleViewReset);
+      window.removeEventListener(
+        "viewport-orientation-axis-request",
+        handleOrientationAxisRequest,
+      );
       window.removeEventListener("snapshot-export-request", handleSnapshotExport);
       window.removeEventListener("animation-export-request", handleAnimationExport);
       window.removeEventListener("beforeunload", handleBeforeUnload);
@@ -2112,8 +2201,137 @@ export function Viewport3D() {
       panoramaTexture?.dispose();
       renderer.dispose();
       renderer.domElement.remove();
+      rendererElementRef.current = undefined;
     };
   }, []);
+
+  const endOrientationPointerTracking = () => {
+    window.removeEventListener("pointermove", handleOrientationPointerMove);
+    window.removeEventListener("pointerup", handleOrientationPointerEnd);
+    window.removeEventListener("pointercancel", handleOrientationPointerEnd);
+  };
+
+  const dispatchViewportPointerEvent = (
+    type: "pointerdown" | "pointermove" | "pointerup",
+    pointerState: OrientationPointerState,
+    clientX: number,
+    clientY: number,
+  ) => {
+    const target = rendererElementRef.current;
+    if (!target) {
+      return false;
+    }
+    try {
+      target.dispatchEvent(
+        new PointerEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          pointerId: pointerState.pointerId,
+          pointerType: pointerState.pointerType,
+          isPrimary: pointerState.isPrimary,
+          clientX,
+          clientY,
+          button: 0,
+          buttons: type === "pointerup" ? 0 : 1,
+        }),
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const handleOrientationPointerMove = (event: PointerEvent) => {
+    const pointerState = orientationPointerRef.current;
+    if (!pointerState || event.pointerId !== pointerState.pointerId) {
+      return;
+    }
+
+    const totalMovement = Math.hypot(
+      event.clientX - pointerState.startX,
+      event.clientY - pointerState.startY,
+    );
+    if (!pointerState.dragging && totalMovement > orientationClickMoveThreshold) {
+      pointerState.dragging = true;
+      dispatchViewportPointerEvent(
+        "pointerdown",
+        pointerState,
+        pointerState.startX,
+        pointerState.startY,
+      );
+    }
+
+    if (pointerState.dragging) {
+      dispatchViewportPointerEvent(
+        "pointermove",
+        pointerState,
+        event.clientX,
+        event.clientY,
+      );
+    }
+
+    pointerState.lastX = event.clientX;
+    pointerState.lastY = event.clientY;
+  };
+
+  const handleOrientationPointerEnd = (event: PointerEvent) => {
+    const pointerState = orientationPointerRef.current;
+    if (!pointerState || event.pointerId !== pointerState.pointerId) {
+      return;
+    }
+
+    endOrientationPointerTracking();
+    orientationPointerRef.current = undefined;
+
+    if (pointerState.dragging) {
+      dispatchViewportPointerEvent(
+        "pointerup",
+        pointerState,
+        event.clientX,
+        event.clientY,
+      );
+      return;
+    }
+
+    window.dispatchEvent(
+      new CustomEvent<OrientationAxisRequestDetail>(
+        "viewport-orientation-axis-request",
+        {
+          detail: {
+            axisId: pointerState.axisId,
+            sign: 1,
+          },
+        },
+      ),
+    );
+  };
+
+  const handleOrientationPointerDown = (
+    event: ReactPointerEvent<HTMLButtonElement>,
+    axisId: OrientationAxisId,
+  ) => {
+    if (event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    endOrientationPointerTracking();
+    orientationPointerRef.current = {
+      axisId,
+      pointerId: event.pointerId,
+      pointerType: event.pointerType,
+      isPrimary: event.isPrimary,
+      startX: event.clientX,
+      startY: event.clientY,
+      lastX: event.clientX,
+      lastY: event.clientY,
+      dragging: false,
+    };
+    window.addEventListener("pointermove", handleOrientationPointerMove);
+    window.addEventListener("pointerup", handleOrientationPointerEnd);
+    window.addEventListener("pointercancel", handleOrientationPointerEnd);
+  };
 
   return (
     <div className="viewport-stage" ref={containerRef}>
@@ -2126,17 +2344,29 @@ export function Viewport3D() {
               key={axis.id}
               style={
                 {
-                  "--axis-x": `${axis.x}px`,
-                  "--axis-y": `${axis.y}px`,
                   "--axis-length": `${axis.length}px`,
                   "--axis-angle": `${axis.angle}deg`,
                   "--axis-opacity": `${0.62 + (1 - axis.depth) * 0.16}`,
-                  zIndex: Math.round((1 - axis.depth) * 10),
                 } as CSSProperties
               }
             >
               <span className="orientation-axis-line" />
-              <span className="orientation-axis-tip">{axis.label}</span>
+              <button
+                aria-label={orientationAxisViewLabels[axis.id]}
+                className="orientation-axis-tip"
+                title={orientationAxisViewLabels[axis.id]}
+                type="button"
+                style={
+                  {
+                    "--axis-tip-x": `${axis.x}px`,
+                    "--axis-tip-y": `${axis.y}px`,
+                    zIndex: Math.round((1 - axis.depth) * 10) + 2,
+                  } as CSSProperties
+                }
+                onPointerDown={(event) => handleOrientationPointerDown(event, axis.id)}
+              >
+                {axis.label}
+              </button>
             </span>
           ))}
         </div>
