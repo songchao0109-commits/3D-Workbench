@@ -130,7 +130,7 @@ export function CameraInspector() {
   const [targetSuggestOpen, setTargetSuggestOpen] = useState(false);
   const [previewImage, setPreviewImage] = useState<string>();
   const inspectedCameraId = useMemo(() => {
-    if (animation.isPlaying) {
+    if (animation.isPlaying && animation.cameraCutsEnabled !== false) {
       return resolvePlaybackCameraId(
         animation.cameraCuts,
         animation.currentTime,
@@ -141,6 +141,7 @@ export function CameraInspector() {
   }, [
     activeCameraId,
     animation.cameraCuts,
+    animation.cameraCutsEnabled,
     animation.currentTime,
     animation.isPlaying,
     selectedCameraId,

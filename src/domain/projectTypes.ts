@@ -242,6 +242,7 @@ export type AnimationTimelineState = {
   loop: boolean;
   autoKeyEnabled: boolean;
   autoKeyMode: AnimationAutoKeyMode;
+  cameraCutsEnabled: boolean;
   bindings: AnimationBinding[];
   cameraCuts: AnimationCameraCut[];
 };

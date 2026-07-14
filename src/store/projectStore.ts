@@ -172,6 +172,7 @@ type ProjectStore = ProjectState & {
   setAnimationPlaying: (playing: boolean) => void;
   toggleAnimationPlayback: () => void;
   toggleAnimationLoop: () => void;
+  toggleAnimationCameraCutsEnabled: () => void;
   setAnimationAutoKeyEnabled: (enabled: boolean) => void;
   setAnimationAutoKeyMode: (mode: ProjectState["animation"]["autoKeyMode"]) => void;
   setAnimationDuration: (duration: number) => void;
@@ -2245,6 +2246,13 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       animation: {
         ...state.animation,
         loop: !state.animation.loop,
+      },
+    })),
+  toggleAnimationCameraCutsEnabled: () =>
+    set((state) => ({
+      animation: {
+        ...state.animation,
+        cameraCutsEnabled: state.animation.cameraCutsEnabled === false,
       },
     })),
   setAnimationAutoKeyEnabled: (enabled) =>

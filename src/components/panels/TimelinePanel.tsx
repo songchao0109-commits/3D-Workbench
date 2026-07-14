@@ -7,6 +7,8 @@ import {
   CornerDownLeft,
   CornerDownRight,
   Download,
+  Eye,
+  EyeOff,
   Pause,
   Play,
   Plus,
@@ -15,6 +17,8 @@ import {
   SkipForward,
   Trash2,
   Video,
+  ZoomIn,
+  ZoomOut,
 } from "lucide-react";
 import type {
   CSSProperties,
@@ -70,6 +74,10 @@ type TimelineCameraMarkerPlacement = TimelineCameraMarker & {
 const OPEN_TIMELINE_MIN_SECONDS = 15;
 const OPEN_TIMELINE_LOOKAHEAD_SECONDS = 15;
 const CAMERA_MARKER_LABEL_COLLISION_PX = 88;
+const TIMELINE_BASE_PIXELS_PER_FRAME = 12;
+const TIMELINE_MIN_ZOOM = 0.25;
+const TIMELINE_MAX_ZOOM = 3;
+const TIMELINE_ZOOM_STEP = 0.15;
 
 function buildDisplayKeyframes(
   items: Array<{ id: string; time: number; refs: TimelineKeyframeRef[]; label?: string }>,
@@ -112,11 +120,16 @@ function formatTimecode(time: number, fps: number) {
     .padStart(2, "0")}`;
 }
 
-function formatTimelineTick(seconds: number) {
-  const safeSeconds = Math.max(0, Math.round(seconds));
-  const minutes = Math.floor(safeSeconds / 60);
-  const remainingSeconds = safeSeconds % 60;
-  return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`;
+function formatTimelineTick(seconds: number, fps: number) {
+  const safeFps = Math.max(1, Math.round(fps));
+  const totalFrames = Math.max(0, Math.round(seconds * safeFps));
+  const totalSeconds = Math.floor(totalFrames / safeFps);
+  const minutes = Math.floor(totalSeconds / 60);
+  const remainingSeconds = totalSeconds % 60;
+  const frames = totalFrames % safeFps;
+  return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}.${frames
+    .toString()
+    .padStart(2, "0")}`;
 }
 
 function formatSeconds(seconds: number) {
@@ -244,6 +257,13 @@ function normalizeExportFrameRange(
   };
 }
 
+function clampTimelineZoom(value: number) {
+  if (!Number.isFinite(value)) {
+    return 1;
+  }
+  return Math.min(TIMELINE_MAX_ZOOM, Math.max(TIMELINE_MIN_ZOOM, value));
+}
+
 export function TimelinePanel({
   expanded,
   height,
@@ -281,6 +301,9 @@ export function TimelinePanel({
     (state) => state.toggleAnimationPlayback,
   );
   const toggleAnimationLoop = useProjectStore((state) => state.toggleAnimationLoop);
+  const toggleAnimationCameraCutsEnabled = useProjectStore(
+    (state) => state.toggleAnimationCameraCutsEnabled,
+  );
   const setAnimationAutoKeyEnabled = useProjectStore(
     (state) => state.setAnimationAutoKeyEnabled,
   );
@@ -324,6 +347,7 @@ export function TimelinePanel({
   const [exportError, setExportError] = useState("");
   const [cameraMenuOpen, setCameraMenuOpen] = useState(false);
   const [lastEditedKeyframeIds, setLastEditedKeyframeIds] = useState<string[]>([]);
+  const [timelineZoom, setTimelineZoom] = useState(1);
   const [toolbarTooltip, setToolbarTooltip] = useState<{
     label: string;
     x: number;
@@ -354,6 +378,7 @@ export function TimelinePanel({
   const activeGroup = activeGroupId
     ? groups.find((group) => group.id === activeGroupId)
     : undefined;
+  const cameraCutsEnabled = animation.cameraCutsEnabled !== false;
 
   useEffect(() => {
     if (!activeGroup) {
@@ -705,6 +730,11 @@ export function TimelinePanel({
   const handleTogglePlaybackMode = () => {
     toggleAnimationLoop();
     setFeedback(animation.loop ? "播放模式：只播放一次" : "播放模式：循环播放");
+  };
+
+  const handleToggleCameraCutsEnabled = () => {
+    toggleAnimationCameraCutsEnabled();
+    setFeedback(cameraCutsEnabled ? "机位切换已关闭" : "机位切换已开启");
   };
 
   const updateRangePointAtClientX = useCallback((
@@ -1112,29 +1142,70 @@ export function TimelinePanel({
     }));
   };
 
-  const rulerTicks = useMemo(() => {
-    const duration = Math.max(1, timelineExtentSeconds);
-    const targetTickCount = 7;
-    const candidates = [1, 2, 5, 10, 15, 30, 60, 120];
-    const step =
-      candidates.find((candidate) => duration / candidate <= targetTickCount) ??
-      candidates[candidates.length - 1];
-    const tickCount = Math.floor(duration / step) + 1;
-    const ticks = Array.from({ length: tickCount }).map((_, index) => {
-      const seconds = Math.min(duration, index * step);
-      return {
-        key: `time-${seconds}`,
-        label: formatTimelineTick(seconds),
-        left: `${(seconds / duration) * 100}%`,
-      };
-    });
-    return ticks;
-  }, [timelineExtentSeconds]);
+  const updateTimelineZoom = useCallback((value: number) => {
+    setTimelineZoom(Number(clampTimelineZoom(value).toFixed(2)));
+  }, []);
+
+  const timelineZoomPercent = Math.round(timelineZoom * 100);
 
   const timelineContentWidth = useMemo(
-    () => Math.min(12000, Math.max(960, Math.round(timelineExtentSeconds * animation.fps * 12))),
-    [animation.fps, timelineExtentSeconds],
+    () =>
+      Math.min(
+        60000,
+        Math.max(
+          960,
+          Math.round(
+            timelineExtentSeconds *
+              animation.fps *
+              TIMELINE_BASE_PIXELS_PER_FRAME *
+              timelineZoom,
+          ),
+        ),
+      ),
+    [animation.fps, timelineExtentSeconds, timelineZoom],
   );
+
+  const rulerTicks = useMemo(() => {
+    const duration = Math.max(1, timelineExtentSeconds);
+    const secondsPerPixel = duration / Math.max(timelineContentWidth, 1);
+    const candidates = [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300];
+    const majorStep =
+      candidates.find((candidate) => candidate / secondsPerPixel >= 86) ??
+      candidates[candidates.length - 1];
+    const minorStep = majorStep / 4;
+    const showMinorTicks = minorStep / secondsPerPixel >= 14;
+    const step = showMinorTicks ? minorStep : majorStep;
+    const ticks: Array<{
+      key: string;
+      label: string;
+      left: string;
+      major: boolean;
+    }> = [];
+
+    const appendTick = (seconds: number, forceMajor = false) => {
+      const safeSeconds = Number(Math.min(duration, Math.max(0, seconds)).toFixed(4));
+      const major =
+        forceMajor ||
+        Math.abs(safeSeconds / majorStep - Math.round(safeSeconds / majorStep)) <
+          0.001;
+      ticks.push({
+        key: `${major ? "major" : "minor"}-${safeSeconds}`,
+        label: major ? formatTimelineTick(safeSeconds, animation.fps) : "",
+        left: `${(safeSeconds / duration) * 100}%`,
+        major,
+      });
+    };
+
+    const tickCount = Math.floor(duration / step) + 1;
+    Array.from({ length: tickCount }).forEach((_, index) => {
+      appendTick(index * step, index === 0);
+    });
+    const lastTick = ticks.at(-1);
+    if (lastTick && Math.abs(parseFloat(lastTick.left) - 100) > 0.001) {
+      appendTick(duration, true);
+    }
+    return ticks;
+  }, [animation.fps, timelineContentWidth, timelineExtentSeconds]);
 
   const cameraMarkerPlacements = useMemo<TimelineCameraMarkerPlacement[]>(() => {
     const groups: Array<Array<{ marker: TimelineCameraMarker; x: number }>> = [];
@@ -1457,7 +1528,9 @@ export function TimelinePanel({
 
   const renderCameraLane = () => (
     <div
-      className="timeline-track-lane timeline-camera-lane"
+      className={`timeline-track-lane timeline-camera-lane ${
+        cameraCutsEnabled ? "" : "is-disabled"
+      }`}
       onPointerDown={handleTimelineLanePointerDown}
     >
       {!cameraCutMarkers.length ? (
@@ -1467,7 +1540,12 @@ export function TimelinePanel({
   );
 
   const renderCameraMarkerLayer = () => (
-    <div className="timeline-camera-marker-layer" aria-hidden={!cameraCutMarkers.length}>
+    <div
+      className={`timeline-camera-marker-layer ${
+        cameraCutsEnabled ? "" : "is-disabled"
+      }`}
+      aria-hidden={!cameraCutMarkers.length}
+    >
       {cameraMarkerPlacements.map((marker) => {
         const isSelected = selectedKeyframe?.id === marker.id;
         return (
@@ -1905,6 +1983,49 @@ export function TimelinePanel({
                     ))}
                   </select>
                 </label>
+                <div className="timeline-zoom-control">
+                  <button
+                    aria-label="缩小时间轴"
+                    className="timeline-icon-button"
+                    data-tooltip="缩小时间轴"
+                    disabled={timelineZoom <= TIMELINE_MIN_ZOOM}
+                    title="缩小时间轴"
+                    type="button"
+                    onBlur={hideToolbarTooltip}
+                    onClick={() => updateTimelineZoom(timelineZoom - TIMELINE_ZOOM_STEP)}
+                    onFocus={(event) => showToolbarTooltip(event, "缩小时间轴")}
+                    onMouseEnter={(event) => showToolbarTooltip(event, "缩小时间轴")}
+                    onMouseLeave={hideToolbarTooltip}
+                  >
+                    <ZoomOut size={15} />
+                  </button>
+                  <input
+                    aria-label="时间轴缩放"
+                    className="timeline-zoom-slider"
+                    max={TIMELINE_MAX_ZOOM}
+                    min={TIMELINE_MIN_ZOOM}
+                    step={0.05}
+                    type="range"
+                    value={timelineZoom}
+                    onChange={(event) => updateTimelineZoom(Number(event.target.value))}
+                  />
+                  <button
+                    aria-label="放大时间轴"
+                    className="timeline-icon-button"
+                    data-tooltip="放大时间轴"
+                    disabled={timelineZoom >= TIMELINE_MAX_ZOOM}
+                    title="放大时间轴"
+                    type="button"
+                    onBlur={hideToolbarTooltip}
+                    onClick={() => updateTimelineZoom(timelineZoom + TIMELINE_ZOOM_STEP)}
+                    onFocus={(event) => showToolbarTooltip(event, "放大时间轴")}
+                    onMouseEnter={(event) => showToolbarTooltip(event, "放大时间轴")}
+                    onMouseLeave={hideToolbarTooltip}
+                  >
+                    <ZoomIn size={15} />
+                  </button>
+                  <span>{timelineZoomPercent}%</span>
+                </div>
                 <button
                   aria-label="自动关键帧"
                   className={`timeline-auto-key-toggle ${
@@ -2068,8 +2189,25 @@ export function TimelinePanel({
                 {formatTimecode(animation.currentTime, animation.fps)}
               </span>
             </div>
-            <div className="timeline-camera-label" ref={cameraMenuRef}>
+            <div
+              className={`timeline-camera-label ${
+                cameraCutsEnabled ? "" : "is-disabled"
+              }`}
+              ref={cameraMenuRef}
+            >
               <span>机位切换</span>
+              <button
+                aria-label={cameraCutsEnabled ? "关闭机位切换" : "开启机位切换"}
+                aria-pressed={cameraCutsEnabled}
+                className={`timeline-camera-switch ${
+                  cameraCutsEnabled ? "is-active" : ""
+                }`}
+                title={cameraCutsEnabled ? "关闭机位切换" : "开启机位切换"}
+                type="button"
+                onClick={handleToggleCameraCutsEnabled}
+              >
+                {cameraCutsEnabled ? <Eye size={15} /> : <EyeOff size={15} />}
+              </button>
               <button
                 className="timeline-camera-add-button"
                 type="button"
@@ -2114,7 +2252,13 @@ export function TimelinePanel({
                 <div className="timeline-ruler" onPointerDown={handleTimelineSeekPointerDown}>
                   {renderIoRange()}
                   {rulerTicks.map((tick) => (
-                    <span className="timeline-ruler-tick" key={tick.key} style={{ left: tick.left }}>
+                    <span
+                      className={`timeline-ruler-tick ${
+                        tick.major ? "is-major" : "is-minor"
+                      }`}
+                      key={tick.key}
+                      style={{ left: tick.left }}
+                    >
                       {tick.label}
                     </span>
                   ))}

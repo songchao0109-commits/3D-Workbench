@@ -1516,13 +1516,11 @@ export function Viewport3D() {
       sampled.objects.forEach(applyObjectState);
       syncCameraRigs(sampled.cameras);
       syncObjectBounds();
-      const cameraId = resolvePlaybackCameraId(
-        state.animation.cameraCuts,
-        time,
-        state.activeCameraId,
-      );
-      const shotCamera =
-        sampled.cameras.find((item) => item.id === cameraId) ?? sampled.cameras[0];
+      const cameraId =
+        state.animation.cameraCutsEnabled !== false && state.animation.cameraCuts.length
+          ? resolvePlaybackCameraId(state.animation.cameraCuts, time)
+          : undefined;
+      const shotCamera = sampled.cameras.find((item) => item.id === cameraId);
       if (shotCamera) {
         applyCameraStateToPerspectiveCamera(
           camera,
@@ -1917,6 +1915,7 @@ export function Viewport3D() {
           cameras: exportState.cameras,
           animation: exportState.animation,
           range,
+          activeCameraId: exportState.activeCameraId,
         });
         downloadJsonFile(payload, `${name}.json`);
         window.dispatchEvent(
@@ -2037,12 +2036,16 @@ export function Viewport3D() {
       const activeCamera = sceneCameras.find(
         (item) => item.id === storeRef.current.activeCameraId,
       );
-      const playbackCameraId = playbackActive
+      const cameraCutsActive =
+        playbackActive &&
+        storeRef.current.animation.cameraCutsEnabled !== false &&
+        storeRef.current.animation.cameraCuts.length > 0;
+      const playbackCameraId = cameraCutsActive
         ? resolvePlaybackCameraId(
             storeRef.current.animation.cameraCuts,
             storeRef.current.animation.currentTime,
           )
-        : storeRef.current.activeCameraId;
+        : undefined;
       const playbackCamera = sceneCameras.find(
         (item) => item.id === playbackCameraId,
       );

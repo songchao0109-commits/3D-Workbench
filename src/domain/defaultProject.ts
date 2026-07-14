@@ -82,6 +82,7 @@ export const defaultProject: ProjectState = {
     loop: false,
     autoKeyEnabled: false,
     autoKeyMode: "add_replace",
+    cameraCutsEnabled: true,
     bindings: [],
     cameraCuts: [],
   },

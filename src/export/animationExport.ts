@@ -37,6 +37,7 @@ type BuildAnimationExportPayloadInput = {
   cameras: SceneCamera[];
   animation: AnimationTimelineState;
   range: AnimationExportRange;
+  activeCameraId?: string;
 };
 
 function pad(value: number) {
@@ -62,7 +63,10 @@ export function buildAnimationExportPayload({
   cameras,
   animation,
   range,
+  activeCameraId,
 }: BuildAnimationExportPayloadInput) {
+  const fallbackCameraId = activeCameraId ?? cameras[0]?.id;
+  const cameraCutsActive = animation.cameraCutsEnabled !== false && animation.cameraCuts.length > 0;
   const frames = Array.from({ length: range.frameCount }).map((_, index) => {
     const frame = range.startFrame + index;
     const time = frame / animation.fps;
@@ -70,11 +74,9 @@ export function buildAnimationExportPayload({
       index,
       frame,
       time,
-      cameraId: resolvePlaybackCameraId(
-        animation.cameraCuts,
-        time,
-        cameras[0]?.id,
-      ),
+      cameraId: cameraCutsActive
+        ? resolvePlaybackCameraId(animation.cameraCuts, time, fallbackCameraId)
+        : undefined,
     };
   });
 
@@ -91,6 +93,7 @@ export function buildAnimationExportPayload({
     objects,
     animation: {
       bindings: animation.bindings,
+      cameraCutsEnabled: animation.cameraCutsEnabled !== false,
       cameraCuts: animation.cameraCuts,
     },
   };
