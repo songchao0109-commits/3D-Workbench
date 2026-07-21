@@ -12,6 +12,7 @@ export function RightPanel() {
   const activeObjectId = useProjectStore((state) => state.activeObjectId);
   const activeGroupId = useProjectStore((state) => state.activeGroupId);
   const selectedObjectIds = useProjectStore((state) => state.selectedObjectIds);
+  const selectedCameraIds = useProjectStore((state) => state.selectedCameraIds);
   const selectedCameraId = useProjectStore((state) => state.selectedCameraId);
   const objects = useProjectStore((state) => state.objects);
   const groups = useProjectStore((state) => state.groups);
@@ -54,7 +55,7 @@ export function RightPanel() {
       <div className="right-panel-content">
         {activeTab === "snapshots" ? (
           <SnapshotPanel />
-        ) : activeGroup || selectedObjectIds.length > 1 ? (
+        ) : activeGroup || selectedObjectIds.length + selectedCameraIds.length > 1 ? (
           <SelectionInspector />
         ) : activeObject ? (
           <ObjectInspector object={activeObject} />

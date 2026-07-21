@@ -84,10 +84,16 @@ type ProjectStore = ProjectState & {
   setActiveObject: (objectId?: string) => void;
   toggleObjectSelection: (objectId: string) => void;
   selectObjectOrGroup: (objectId: string) => void;
-  toggleSelectionUnit: (objectId: string) => void;
+  toggleSelectionUnit: (assetId: string, kind?: "object" | "camera") => void;
   setSelectedObjects: (objectIds: string[], primaryObjectId?: string) => void;
+  setSelectedAssets: (
+    objectIds: string[],
+    cameraIds: string[],
+    primary?: { kind: "object" | "camera"; id: string },
+  ) => void;
   setActiveGroup: (groupId?: string) => void;
   setActiveCamera: (cameraId: string) => void;
+  selectCameraOrGroup: (cameraId: string) => void;
   setCameraPreviewActive: (active: boolean) => void;
   addCamera: (camera?: Partial<SceneCamera>) => void;
   updateCamera: (cameraId: string, updates: Partial<SceneCamera>) => void;
@@ -141,6 +147,7 @@ type ProjectStore = ProjectState & {
   toggleGroupLocked: (groupId: string) => void;
   removeGroup: (groupId: string) => void;
   moveObjectToGroup: (objectId: string, targetGroupId?: string) => void;
+  moveCameraToGroup: (cameraId: string, targetGroupId?: string) => void;
   moveSelectionToGroup: (targetGroupId: string) => void;
   snapSelectionToGround: () => void;
   alignSelection: (
@@ -541,6 +548,7 @@ function cloneProjectState(state: ProjectState): ProjectState {
       activeObjectId: state.activeObjectId,
       activeGroupId: state.activeGroupId,
       selectedObjectIds: state.selectedObjectIds,
+      selectedCameraIds: state.selectedCameraIds,
       selectedCameraId: state.selectedCameraId,
       activeCameraId: state.activeCameraId,
       activeTool: state.activeTool,
@@ -631,6 +639,11 @@ function normalizeObjectIds(objectIds: string[], objects: SceneObject[]) {
   return Array.from(new Set(objectIds.filter((id) => validIds.has(id))));
 }
 
+function normalizeCameraIds(cameraIds: string[], cameras: SceneCamera[]) {
+  const validIds = new Set(cameras.map((camera) => camera.id));
+  return Array.from(new Set(cameraIds.filter((id) => validIds.has(id))));
+}
+
 function nextObjectCopyName(name: string, existingNames: Set<string>) {
   const baseName = `${name} 副本`;
   if (!existingNames.has(baseName)) {
@@ -679,21 +692,41 @@ function getSelectedObjectIds(state: ProjectStore) {
   return normalizeObjectIds(selectedIds, state.objects);
 }
 
+function getSelectedCameraIds(state: ProjectStore) {
+  const selectedIds = state.selectedCameraIds.length
+    ? state.selectedCameraIds
+    : state.selectedCameraId
+      ? [state.selectedCameraId]
+      : [];
+  return normalizeCameraIds(selectedIds, state.cameras);
+}
+
 function getObjectGroupId(groups: SceneGroup[], objectId: string) {
   return groups.find((group) => group.objectIds.includes(objectId))?.id;
 }
 
-function getExactSelectedGroupId(groups: SceneGroup[], objectIds: string[]) {
-  const selectedIds = new Set(objectIds);
+function getCameraGroupId(groups: SceneGroup[], cameraId: string) {
+  return groups.find((group) => group.cameraIds.includes(cameraId))?.id;
+}
+
+function getExactSelectedGroupId(
+  groups: SceneGroup[],
+  objectIds: string[],
+  cameraIds: string[] = [],
+) {
+  const selectedObjectIds = new Set(objectIds);
+  const selectedCameraIds = new Set(cameraIds);
   return groups.find(
     (group) =>
-      group.objectIds.length === selectedIds.size &&
-      group.objectIds.every((objectId) => selectedIds.has(objectId)),
+      group.objectIds.length === selectedObjectIds.size &&
+      group.cameraIds.length === selectedCameraIds.size &&
+      group.objectIds.every((objectId) => selectedObjectIds.has(objectId)) &&
+      group.cameraIds.every((cameraId) => selectedCameraIds.has(cameraId)),
   )?.id;
 }
 
 function getCopyContextError(state: ProjectStore) {
-  if (state.selectedCameraId) {
+  if (state.selectedCameraIds.length || state.selectedCameraId) {
     return "当前选中的是机位，不能复制对象";
   }
   const selectedObjectIds = getSelectedObjectIds(state);
@@ -836,6 +869,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       activeObjectId: undefined,
       activeGroupId: undefined,
       selectedObjectIds: [],
+      selectedCameraIds: [],
       selectedCameraId: undefined,
     }),
   setActiveObject: (objectId) =>
@@ -843,6 +877,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       activeObjectId: objectId,
       activeGroupId: undefined,
       selectedObjectIds: objectId ? [objectId] : [],
+      selectedCameraIds: [],
       selectedCameraId: undefined,
       objects: state.objects.map((object) =>
         object.id === objectId && object.rig
@@ -867,6 +902,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         selectedObjectIds: normalizedIds,
         activeObjectId: normalizedIds.at(-1),
         activeGroupId: undefined,
+        selectedCameraIds: [],
         selectedCameraId: undefined,
         objects: state.objects.map((object) =>
           object.id === objectId && object.rig
@@ -901,6 +937,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
           activeObjectId: objectId,
           activeGroupId: undefined,
           selectedObjectIds: [objectId],
+          selectedCameraIds: [],
           selectedCameraId: undefined,
           objects,
         };
@@ -910,6 +947,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
           activeObjectId: objectId,
           activeGroupId: undefined,
           selectedObjectIds: [objectId],
+          selectedCameraIds: [],
           selectedCameraId: undefined,
           objects,
         };
@@ -918,36 +956,62 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         activeObjectId: group.objectIds[0],
         activeGroupId: group.id,
         selectedObjectIds: [...group.objectIds],
-        selectedCameraId: undefined,
+        selectedCameraIds: [...group.cameraIds],
+        selectedCameraId: group.cameraIds[0],
         objects,
       };
     }),
-  toggleSelectionUnit: (objectId) =>
+  toggleSelectionUnit: (assetId, kind = "object") =>
     set((state) => {
-      const groupId = getObjectGroupId(state.groups, objectId);
+      const groupId = kind === "camera"
+        ? getCameraGroupId(state.groups, assetId)
+        : getObjectGroupId(state.groups, assetId);
       const group = groupId ? state.groups.find((item) => item.id === groupId) : undefined;
-      const unitIds = group?.objectIds ?? [objectId];
-      const selectedIds = new Set(state.selectedObjectIds);
-      const unitIsSelected = unitIds.every((id) => selectedIds.has(id));
-      unitIds.forEach((id) => {
+      const unitObjectIds = group?.objectIds ?? (kind === "object" ? [assetId] : []);
+      const unitCameraIds = group?.cameraIds ?? (kind === "camera" ? [assetId] : []);
+      const selectedObjectIdsSet = new Set(state.selectedObjectIds);
+      const selectedCameraIdsSet = new Set(state.selectedCameraIds);
+      const unitIsSelected =
+        unitObjectIds.every((id) => selectedObjectIdsSet.has(id)) &&
+        unitCameraIds.every((id) => selectedCameraIdsSet.has(id));
+      unitObjectIds.forEach((id) => {
         if (unitIsSelected) {
-          selectedIds.delete(id);
+          selectedObjectIdsSet.delete(id);
         } else {
-          selectedIds.add(id);
+          selectedObjectIdsSet.add(id);
         }
       });
-      const selectedObjectIds = normalizeObjectIds(Array.from(selectedIds), state.objects);
-      const activeGroupId = getExactSelectedGroupId(state.groups, selectedObjectIds);
+      unitCameraIds.forEach((id) => {
+        if (unitIsSelected) {
+          selectedCameraIdsSet.delete(id);
+        } else {
+          selectedCameraIdsSet.add(id);
+        }
+      });
+      const selectedObjectIds = normalizeObjectIds(
+        Array.from(selectedObjectIdsSet),
+        state.objects,
+      );
+      const selectedCameraIds = normalizeCameraIds(
+        Array.from(selectedCameraIdsSet),
+        state.cameras,
+      );
+      const activeGroupId = getExactSelectedGroupId(
+        state.groups,
+        selectedObjectIds,
+        selectedCameraIds,
+      );
       const activeGroup = activeGroupId
         ? state.groups.find((item) => item.id === activeGroupId)
         : undefined;
       return {
         selectedObjectIds,
+        selectedCameraIds,
         activeObjectId: activeGroup?.objectIds[0] ?? selectedObjectIds.at(-1),
         activeGroupId,
-        selectedCameraId: undefined,
+        selectedCameraId: activeGroup?.cameraIds[0] ?? selectedCameraIds.at(-1),
         objects: state.objects.map((object) =>
-          object.id === objectId && object.rig
+          object.id === assetId && kind === "object" && object.rig
             ? {
                 ...object,
                 rig: {
@@ -968,12 +1032,43 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         : undefined;
       return {
         selectedObjectIds,
+        selectedCameraIds: [],
         activeObjectId: activeGroup?.objectIds[0] ??
           (primaryObjectId && selectedObjectIds.includes(primaryObjectId)
             ? primaryObjectId
             : selectedObjectIds.at(-1)),
         activeGroupId,
         selectedCameraId: undefined,
+      };
+    }),
+  setSelectedAssets: (objectIds, cameraIds, primary) =>
+    set((state) => {
+      const selectedObjectIds = normalizeObjectIds(objectIds, state.objects);
+      const selectedCameraIds = normalizeCameraIds(cameraIds, state.cameras);
+      const activeGroupId = getExactSelectedGroupId(
+        state.groups,
+        selectedObjectIds,
+        selectedCameraIds,
+      );
+      const activeGroup = activeGroupId
+        ? state.groups.find((item) => item.id === activeGroupId)
+        : undefined;
+      const primaryObjectId =
+        primary?.kind === "object" && selectedObjectIds.includes(primary.id)
+          ? primary.id
+          : undefined;
+      const primaryCameraId =
+        primary?.kind === "camera" && selectedCameraIds.includes(primary.id)
+          ? primary.id
+          : undefined;
+      return {
+        selectedObjectIds,
+        selectedCameraIds,
+        activeObjectId:
+          activeGroup?.objectIds[0] ?? primaryObjectId ?? selectedObjectIds.at(-1),
+        activeGroupId,
+        selectedCameraId:
+          activeGroup?.cameraIds[0] ?? primaryCameraId ?? selectedCameraIds.at(-1),
       };
     }),
   setActiveGroup: (groupId) =>
@@ -984,8 +1079,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       return {
         activeGroupId: group?.id,
         selectedObjectIds: group ? [...group.objectIds] : [],
+        selectedCameraIds: group ? [...group.cameraIds] : [],
         activeObjectId: group?.objectIds[0],
-        selectedCameraId: undefined,
+        selectedCameraId: group?.cameraIds[0],
         objects: group
           ? state.objects.map((object) =>
               group.objectIds.includes(object.id) && object.rig
@@ -1005,9 +1101,33 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     set({
       activeCameraId: cameraId,
       selectedCameraId: cameraId,
+      selectedCameraIds: [cameraId],
       activeObjectId: undefined,
       activeGroupId: undefined,
       selectedObjectIds: [],
+    }),
+  selectCameraOrGroup: (cameraId) =>
+    set((state) => {
+      const groupId = getCameraGroupId(state.groups, cameraId);
+      const group = groupId ? state.groups.find((item) => item.id === groupId) : undefined;
+      if (!group || state.activeGroupId === group.id) {
+        return {
+          activeCameraId: cameraId,
+          selectedCameraId: cameraId,
+          selectedCameraIds: [cameraId],
+          activeObjectId: undefined,
+          activeGroupId: undefined,
+          selectedObjectIds: [],
+        };
+      }
+      return {
+        activeCameraId: cameraId,
+        selectedCameraId: group.cameraIds[0],
+        selectedCameraIds: [...group.cameraIds],
+        activeObjectId: group.objectIds[0],
+        activeGroupId: group.id,
+        selectedObjectIds: [...group.objectIds],
+      };
     }),
   setCameraPreviewActive: (active) => set({ cameraPreviewActive: active }),
   addCamera: (camera = {}) =>
@@ -1034,6 +1154,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         cameras: [...state.cameras, nextCamera],
         activeCameraId: id,
         selectedCameraId: id,
+        selectedCameraIds: [id],
         activeObjectId: undefined,
         activeGroupId: undefined,
         selectedObjectIds: [],
@@ -1141,6 +1262,12 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         state.activeCameraId === cameraId
           ? nextCameras[0].id
           : state.activeCameraId ?? nextCameras[0].id;
+      const groups = state.groups
+        .map((group) => ({
+          ...group,
+          cameraIds: group.cameraIds.filter((id) => id !== cameraId),
+        }))
+        .filter((group) => group.objectIds.length + group.cameraIds.length > 0);
 
       window.dispatchEvent(
         new CustomEvent("scene-camera-remove-request", {
@@ -1150,11 +1277,16 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
       return withHistory(state, {
         cameras: nextCameras,
+        groups,
         activeCameraId: nextActiveCameraId,
         selectedCameraId:
           state.selectedCameraId === cameraId ? undefined : state.selectedCameraId,
+        selectedCameraIds: state.selectedCameraIds.filter((id) => id !== cameraId),
         activeObjectId: undefined,
-        activeGroupId: undefined,
+        activeGroupId:
+          state.activeGroupId && groups.some((group) => group.id === state.activeGroupId)
+            ? state.activeGroupId
+            : undefined,
         selectedObjectIds: [],
         cameraPreviewActive:
           state.activeCameraId === cameraId ? false : state.cameraPreviewActive,
@@ -1228,6 +1360,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
           : object,
       ),
       activeObjectId: objectId,
+      selectedCameraIds: [],
       selectedCameraId: undefined,
     })),
   updateBoneRotation: (objectId, boneId, rotation) =>
@@ -1327,6 +1460,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
           : object,
       ),
       activeObjectId: objectId,
+      selectedCameraIds: [],
       selectedCameraId: undefined,
     })),
   updateIkChain: (objectId, chainId, updates) =>
@@ -1463,7 +1597,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
           ...group,
           objectIds: group.objectIds.filter((id) => id !== objectId),
         }))
-        .filter((group) => group.objectIds.length > 0);
+        .filter((group) => group.objectIds.length + group.cameraIds.length > 0);
 
       return withHistory(state, {
         assets: removeUnreferencedAssets(state, objects, removedAssetIds),
@@ -1489,9 +1623,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     }
     const selectedIds = getSelectedObjectIds(state);
     const selectedSet = new Set(selectedIds);
-    const groups = state.groups.filter((group) =>
-      group.objectIds.some((id) => selectedSet.has(id)),
-    );
+    const groups = state.groups
+      .filter((group) => group.objectIds.some((id) => selectedSet.has(id)))
+      .map((group) => ({ ...group, cameraIds: [] }));
     set({
       clipboard: {
         objects: state.objects.filter((object) => selectedSet.has(object.id)),
@@ -1544,7 +1678,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     });
     const selectedIds = nextObjects.map((object) => object.id);
     const nextGroups = clipboard.groups
-      .map((group) => {
+      .map((group): SceneGroup | undefined => {
         const objectIds = group.objectIds
           .map((objectId) => idMap.get(objectId))
           .filter((objectId): objectId is string => Boolean(objectId));
@@ -1556,6 +1690,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
           id: `group_${crypto.randomUUID()}`,
           name: nextObjectCopyName(group.name, new Set(state.groups.map((item) => item.name))),
           objectIds,
+          cameraIds: [],
         };
       })
       .filter((group): group is SceneGroup => Boolean(group));
@@ -1567,6 +1702,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         selectedObjectIds: selectedIds,
         activeObjectId: selectedIds.at(-1),
         activeGroupId: nextGroups[0]?.id,
+        selectedCameraIds: [],
         selectedCameraId: undefined,
         clipboard: {
           ...clipboard,
@@ -1652,32 +1788,36 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
             ...group,
             objectIds: group.objectIds.filter((objectId) => !previewObjectIds.has(objectId)),
           }))
-          .filter((group) => group.objectIds.length > 0),
+          .filter((group) => group.objectIds.length + group.cameraIds.length > 0),
         animation,
         selectedObjectIds: preview.originalObjectIds,
         activeObjectId: preview.originalActiveObjectId ?? preview.originalObjectIds.at(-1),
         activeGroupId: preview.originalActiveGroupId,
+        selectedCameraIds: [],
         selectedCameraId: undefined,
       });
     }),
   removeSelection: () => {
     const current = get();
-    const selectedIds = getSelectedObjectIds(current);
-    if (!selectedIds.length) {
-      emitAppFeedback("请先选择对象，再执行删除");
+    const selectedObjectIds = getSelectedObjectIds(current);
+    const selectedCameraIds = getSelectedCameraIds(current);
+    const selectedCount = selectedObjectIds.length + selectedCameraIds.length;
+    if (!selectedCount) {
+      emitAppFeedback("请先选择对象或机位，再执行删除");
       return;
     }
     if (
-      selectedIds.length >= 5 &&
-      !window.confirm(`即将删除 ${selectedIds.length} 个对象，是否继续？`)
+      selectedCount >= 5 &&
+      !window.confirm(`即将删除 ${selectedCount} 个项目，是否继续？`)
     ) {
       return;
     }
     set((state) => {
-      const selectedSet = new Set(selectedIds);
+      const selectedObjectSet = new Set(selectedObjectIds);
+      const selectedCameraSet = new Set(selectedCameraIds);
       const removedAssetIds = new Set<string>();
       state.objects.forEach((object) => {
-        if (!selectedSet.has(object.id)) {
+        if (!selectedObjectSet.has(object.id)) {
           return;
         }
         if (object.assetId) {
@@ -1694,21 +1834,51 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
           }),
         );
       });
-      const objects = state.objects.filter((object) => !selectedSet.has(object.id));
+      selectedCameraSet.forEach((cameraId) => {
+        window.dispatchEvent(
+          new CustomEvent("scene-camera-remove-request", { detail: cameraId }),
+        );
+      });
+      const objects = state.objects.filter((object) => !selectedObjectSet.has(object.id));
+      const remainingCameras = state.cameras.filter(
+        (camera) => !selectedCameraSet.has(camera.id),
+      );
+      const fallbackCamera: SceneCamera = {
+        id: `camera_${crypto.randomUUID()}`,
+        name: "相机1",
+        position: [8, 5.2, 7.4],
+        rotation: [-0.7, 0.8, 0.5],
+        target: [0, 0, 0],
+        targetOffset: [0, 0, 0],
+        targetMode: "manual",
+        fov: 45,
+        mode: "lookAt",
+        visible: true,
+        locked: false,
+      };
+      const cameras = remainingCameras.length ? remainingCameras : [fallbackCamera];
       const groups = state.groups
         .map((group) => ({
           ...group,
-          objectIds: group.objectIds.filter((id) => !selectedSet.has(id)),
+          objectIds: group.objectIds.filter((id) => !selectedObjectSet.has(id)),
+          cameraIds: group.cameraIds.filter((id) => !selectedCameraSet.has(id)),
         }))
-        .filter((group) => group.objectIds.length > 0);
+        .filter((group) => group.objectIds.length + group.cameraIds.length > 0);
       return withHistory(state, {
         assets: removeUnreferencedAssets(state, objects, removedAssetIds),
         objects,
+        cameras,
         groups,
         animation: removeAnimationTargets(state.animation, {
-          objectIds: selectedSet,
+          objectIds: selectedObjectSet,
+          cameraIds: selectedCameraSet,
         }),
         selectedObjectIds: [],
+        selectedCameraIds: [],
+        selectedCameraId: undefined,
+        activeCameraId: selectedCameraSet.has(state.activeCameraId ?? "")
+          ? cameras[0].id
+          : state.activeCameraId ?? cameras[0].id,
         activeObjectId: undefined,
         activeGroupId: undefined,
       });
@@ -1716,17 +1886,22 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   },
   setSelectionVisible: (visible) =>
     set((state) => {
-      const selectedSet = new Set(getSelectedObjectIds(state));
-      if (!selectedSet.size && !state.activeGroupId) {
+      const selectedObjectSet = new Set(getSelectedObjectIds(state));
+      const selectedCameraSet = new Set(getSelectedCameraIds(state));
+      if (!selectedObjectSet.size && !selectedCameraSet.size && !state.activeGroupId) {
         return state;
       }
       const activeGroup = state.activeGroupId
         ? state.groups.find((group) => group.id === state.activeGroupId)
         : undefined;
-      activeGroup?.objectIds.forEach((id) => selectedSet.add(id));
+      activeGroup?.objectIds.forEach((id) => selectedObjectSet.add(id));
+      activeGroup?.cameraIds.forEach((id) => selectedCameraSet.add(id));
       return withHistory(state, {
         objects: state.objects.map((object) =>
-          selectedSet.has(object.id) ? { ...object, visible } : object,
+          selectedObjectSet.has(object.id) ? { ...object, visible } : object,
+        ),
+        cameras: state.cameras.map((camera) =>
+          selectedCameraSet.has(camera.id) ? { ...camera, visible } : camera,
         ),
         groups: state.groups.map((group) =>
           group.id === state.activeGroupId ? { ...group, visible } : group,
@@ -1735,17 +1910,22 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     }),
   setSelectionLocked: (locked) =>
     set((state) => {
-      const selectedSet = new Set(getSelectedObjectIds(state));
-      if (!selectedSet.size && !state.activeGroupId) {
+      const selectedObjectSet = new Set(getSelectedObjectIds(state));
+      const selectedCameraSet = new Set(getSelectedCameraIds(state));
+      if (!selectedObjectSet.size && !selectedCameraSet.size && !state.activeGroupId) {
         return state;
       }
       const activeGroup = state.activeGroupId
         ? state.groups.find((group) => group.id === state.activeGroupId)
         : undefined;
-      activeGroup?.objectIds.forEach((id) => selectedSet.add(id));
+      activeGroup?.objectIds.forEach((id) => selectedObjectSet.add(id));
+      activeGroup?.cameraIds.forEach((id) => selectedCameraSet.add(id));
       return withHistory(state, {
         objects: state.objects.map((object) =>
-          selectedSet.has(object.id) ? { ...object, locked } : object,
+          selectedObjectSet.has(object.id) ? { ...object, locked } : object,
+        ),
+        cameras: state.cameras.map((camera) =>
+          selectedCameraSet.has(camera.id) ? { ...camera, locked } : camera,
         ),
         groups: state.groups.map((group) =>
           group.id === state.activeGroupId ? { ...group, locked } : group,
@@ -1754,13 +1934,16 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     }),
   groupSelection: () => {
     const state = get();
-    const selectedIds = getSelectedObjectIds(state);
-    if (selectedIds.length < 2) {
-      return { ok: false as const, message: "请至少选择两个对象再打组" };
+    const selectedObjectIds = getSelectedObjectIds(state);
+    const selectedCameraIds = getSelectedCameraIds(state);
+    if (selectedObjectIds.length + selectedCameraIds.length < 2) {
+      return { ok: false as const, message: "请至少选择两个对象或机位再打组" };
     }
-    const groupedId = selectedIds.find((id) => getObjectGroupId(state.groups, id));
+    const groupedId =
+      selectedObjectIds.find((id) => getObjectGroupId(state.groups, id)) ??
+      selectedCameraIds.find((id) => getCameraGroupId(state.groups, id));
     if (groupedId) {
-      return { ok: false as const, message: "已在组内的对象请先解组" };
+      return { ok: false as const, message: "已在组内的项目请先解组" };
     }
     const groupId = `group_${crypto.randomUUID()}`;
     const group: SceneGroup = {
@@ -1769,7 +1952,8 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       visible: true,
       locked: false,
       collapsed: false,
-      objectIds: selectedIds,
+      objectIds: selectedObjectIds,
+      cameraIds: selectedCameraIds,
       position: [0, 0, 0],
       rotation: [0, 0, 0],
       scale: [1, 1, 1],
@@ -1778,9 +1962,10 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       withHistory(current, {
         groups: [...current.groups, group],
         activeGroupId: groupId,
-        selectedObjectIds: selectedIds,
-        activeObjectId: selectedIds[0],
-        selectedCameraId: undefined,
+        selectedObjectIds,
+        selectedCameraIds,
+        activeObjectId: selectedObjectIds[0],
+        selectedCameraId: selectedCameraIds[0],
       }),
     );
     return { ok: true as const, groupId };
@@ -1793,6 +1978,12 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       }
       state.selectedObjectIds.forEach((objectId) => {
         const groupId = getObjectGroupId(state.groups, objectId);
+        if (groupId) {
+          groupIds.add(groupId);
+        }
+      });
+      state.selectedCameraIds.forEach((cameraId) => {
+        const groupId = getCameraGroupId(state.groups, cameraId);
         if (groupId) {
           groupIds.add(groupId);
         }
@@ -1831,12 +2022,16 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       }
       const visible = !group.visible;
       const objectIds = new Set(group.objectIds);
+      const cameraIds = new Set(group.cameraIds);
       return withHistory(state, {
         groups: state.groups.map((item) =>
           item.id === groupId ? { ...item, visible } : item,
         ),
         objects: state.objects.map((object) =>
           objectIds.has(object.id) ? { ...object, visible } : object,
+        ),
+        cameras: state.cameras.map((camera) =>
+          cameraIds.has(camera.id) ? { ...camera, visible } : camera,
         ),
       });
     }),
@@ -1848,12 +2043,16 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       }
       const locked = !group.locked;
       const objectIds = new Set(group.objectIds);
+      const cameraIds = new Set(group.cameraIds);
       return withHistory(state, {
         groups: state.groups.map((item) =>
           item.id === groupId ? { ...item, locked } : item,
         ),
         objects: state.objects.map((object) =>
           objectIds.has(object.id) ? { ...object, locked } : object,
+        ),
+        cameras: state.cameras.map((camera) =>
+          cameraIds.has(camera.id) ? { ...camera, locked } : camera,
         ),
       });
     }),
@@ -1864,6 +2063,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         return state;
       }
       const objectIds = new Set(group.objectIds);
+      const cameraIds = new Set(group.cameraIds);
       const removedAssetIds = new Set<string>();
       state.objects.forEach((object) => {
         if (!objectIds.has(object.id)) {
@@ -1883,15 +2083,42 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
           }),
         );
       });
+      cameraIds.forEach((cameraId) => {
+        window.dispatchEvent(
+          new CustomEvent("scene-camera-remove-request", { detail: cameraId }),
+        );
+      });
       const objects = state.objects.filter((object) => !objectIds.has(object.id));
+      const remainingCameras = state.cameras.filter((camera) => !cameraIds.has(camera.id));
+      const fallbackCamera: SceneCamera = {
+        id: `camera_${crypto.randomUUID()}`,
+        name: "相机1",
+        position: [8, 5.2, 7.4],
+        rotation: [-0.7, 0.8, 0.5],
+        target: [0, 0, 0],
+        targetOffset: [0, 0, 0],
+        targetMode: "manual",
+        fov: 45,
+        mode: "lookAt",
+        visible: true,
+        locked: false,
+      };
+      const cameras = remainingCameras.length ? remainingCameras : [fallbackCamera];
       return withHistory(state, {
         assets: removeUnreferencedAssets(state, objects, removedAssetIds),
         objects,
+        cameras,
         groups: state.groups.filter((item) => item.id !== groupId),
         animation: removeAnimationTargets(state.animation, {
           objectIds,
+          cameraIds,
         }),
         selectedObjectIds: [],
+        selectedCameraIds: [],
+        selectedCameraId: undefined,
+        activeCameraId: cameraIds.has(state.activeCameraId ?? "")
+          ? cameras[0].id
+          : state.activeCameraId ?? cameras[0].id,
         activeObjectId: undefined,
         activeGroupId: undefined,
       });
@@ -1925,31 +2152,82 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
           }
           return group;
         })
-        .filter((group) => group.objectIds.length > 0);
+        .filter((group) => group.objectIds.length + group.cameraIds.length > 0);
       return withHistory(state, {
         groups,
-        activeGroupId: getExactSelectedGroupId(groups, state.selectedObjectIds),
+        activeGroupId: getExactSelectedGroupId(
+          groups,
+          state.selectedObjectIds,
+          state.selectedCameraIds,
+        ),
+      });
+    }),
+  moveCameraToGroup: (cameraId, targetGroupId) =>
+    set((state) => {
+      if (!state.cameras.some((camera) => camera.id === cameraId)) {
+        return state;
+      }
+      const sourceGroupId = getCameraGroupId(state.groups, cameraId);
+      if (sourceGroupId === targetGroupId) {
+        return state;
+      }
+      if (targetGroupId && !state.groups.some((group) => group.id === targetGroupId)) {
+        emitAppFeedback("目标分组不存在");
+        return state;
+      }
+      const groups = state.groups
+        .map((group) => {
+          if (group.id === sourceGroupId) {
+            return {
+              ...group,
+              cameraIds: group.cameraIds.filter((id) => id !== cameraId),
+            };
+          }
+          if (group.id === targetGroupId) {
+            return {
+              ...group,
+              cameraIds: [...group.cameraIds, cameraId],
+            };
+          }
+          return group;
+        })
+        .filter((group) => group.objectIds.length + group.cameraIds.length > 0);
+      return withHistory(state, {
+        groups,
+        activeGroupId: getExactSelectedGroupId(
+          groups,
+          state.selectedObjectIds,
+          state.selectedCameraIds,
+        ),
       });
     }),
   moveSelectionToGroup: (targetGroupId) =>
     set((state) => {
       const selectedObjectIds = getSelectedObjectIds(state);
-      if (!selectedObjectIds.length) {
-        emitAppFeedback("请先选择对象");
+      const selectedCameraIds = getSelectedCameraIds(state);
+      if (!selectedObjectIds.length && !selectedCameraIds.length) {
+        emitAppFeedback("请先选择对象或机位");
         return state;
       }
       if (!state.groups.some((group) => group.id === targetGroupId)) {
         emitAppFeedback("目标分组不存在");
         return state;
       }
-      if (selectedObjectIds.some((objectId) => getObjectGroupId(state.groups, objectId))) {
-        emitAppFeedback("请先移出已有分组的对象");
+      if (
+        selectedObjectIds.some((objectId) => getObjectGroupId(state.groups, objectId)) ||
+        selectedCameraIds.some((cameraId) => getCameraGroupId(state.groups, cameraId))
+      ) {
+        emitAppFeedback("请先移出已有分组的项目");
         return state;
       }
       return withHistory(state, {
         groups: state.groups.map((group) =>
           group.id === targetGroupId
-            ? { ...group, objectIds: [...group.objectIds, ...selectedObjectIds] }
+            ? {
+                ...group,
+                objectIds: [...group.objectIds, ...selectedObjectIds],
+                cameraIds: [...group.cameraIds, ...selectedCameraIds],
+              }
             : group,
         ),
         activeGroupId: undefined,
@@ -2200,6 +2478,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       activeObjectId: object.id,
       activeGroupId: undefined,
       selectedObjectIds: [object.id],
+      selectedCameraIds: [],
       selectedCameraId: undefined,
     })),
   addImportedModel: (asset, object) =>
@@ -2209,6 +2488,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       activeObjectId: object.id,
       activeGroupId: undefined,
       selectedObjectIds: [object.id],
+      selectedCameraIds: [],
       selectedCameraId: undefined,
       importError: undefined,
     })),
@@ -2553,6 +2833,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
             ?.type === "character"
             ? state.activeObjectId
             : undefined,
+        selectedCameraIds: [],
         selectedCameraId: undefined,
         cameraPreviewActive: false,
       };

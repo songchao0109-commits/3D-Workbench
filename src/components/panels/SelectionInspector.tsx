@@ -14,8 +14,10 @@ import { useProjectStore } from "../../store/projectStore";
 
 export function SelectionInspector() {
   const objects = useProjectStore((state) => state.objects);
+  const cameras = useProjectStore((state) => state.cameras);
   const groups = useProjectStore((state) => state.groups);
   const selectedObjectIds = useProjectStore((state) => state.selectedObjectIds);
+  const selectedCameraIds = useProjectStore((state) => state.selectedCameraIds);
   const removeSelection = useProjectStore((state) => state.removeSelection);
   const setSelectionVisible = useProjectStore((state) => state.setSelectionVisible);
   const setSelectionLocked = useProjectStore((state) => state.setSelectionLocked);
@@ -28,13 +30,24 @@ export function SelectionInspector() {
   const selectedObjects = objects.filter((object) =>
     selectedObjectIds.includes(object.id),
   );
-  const hasHidden = selectedObjects.some((object) => !object.visible);
-  const hasUnlocked = selectedObjects.some((object) => !object.locked);
+  const selectedCameras = cameras.filter((camera) =>
+    selectedCameraIds.includes(camera.id),
+  );
+  const selectedCount = selectedObjects.length + selectedCameras.length;
+  const hasHidden =
+    selectedObjects.some((object) => !object.visible) ||
+    selectedCameras.some((camera) => !camera.visible);
+  const hasUnlocked =
+    selectedObjects.some((object) => !object.locked) ||
+    selectedCameras.some((camera) => !camera.locked);
   const unlockedCount = selectedObjects.filter((object) => !object.locked).length;
   const canGroup =
-    selectedObjects.length > 1 &&
+    selectedCount > 1 &&
     selectedObjects.every(
       (object) => !groups.some((group) => group.objectIds.includes(object.id)),
+    ) &&
+    selectedCameras.every(
+      (camera) => !groups.some((group) => group.cameraIds.includes(camera.id)),
     );
   const canAlign = unlockedCount > 1;
   const activeGroup = activeGroupId
@@ -46,7 +59,16 @@ export function SelectionInspector() {
       <div className="panel-heading object-heading">
         <div>
           <h2>{activeGroup ? "组属性" : "多选属性"}</h2>
-          {!activeGroup ? <p>已选择 {selectedObjects.length} 个对象</p> : null}
+          {!activeGroup ? (
+            <p>
+              已选择 {selectedCount} 项
+              {selectedObjects.length && selectedCameras.length
+                ? ` · ${selectedObjects.length} 个对象 / ${selectedCameras.length} 个机位`
+                : selectedCameras.length
+                  ? ` · ${selectedCameras.length} 个机位`
+                  : ` · ${selectedObjects.length} 个对象`}
+            </p>
+          ) : null}
         </div>
       </div>
 
@@ -63,7 +85,9 @@ export function SelectionInspector() {
                 onChange={(event) => updateGroup(activeGroup.id, { name: event.target.value })}
               />
             </div>
-            <div className="group-selection-count">组内对象 {selectedObjects.length}</div>
+            <div className="group-selection-count">
+              组内对象 {selectedObjects.length} · 机位 {selectedCameras.length}
+            </div>
           </section>
 
           <section className="group-selection-section">

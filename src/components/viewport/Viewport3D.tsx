@@ -23,6 +23,10 @@ import {
   type AnimationExportRequestDetail,
 } from "../../export/animationExport";
 import {
+  encodeCanvasFramesToMp4,
+  isOfflineMp4ExportSupported,
+} from "../../export/offlineVideoExport";
+import {
   createSnapshotName,
   downloadDataUrl,
   exportCanvasWithAspectRatio,
@@ -1926,13 +1930,48 @@ export function Viewport3D() {
       };
 
       try {
+        const recording = createRecordingCanvas();
+
+        if (isOfflineMp4ExportSupported()) {
+          try {
+            const blob = await encodeCanvasFramesToMp4({
+              canvas: recording.canvas,
+              fps: exportState.animation.fps,
+              frameCount: range.frameCount,
+              renderFrame: (frameIndex) => {
+                const frame = range.startFrame + frameIndex;
+                renderSampledAnimationFrame(frame / exportState.animation.fps, exportState);
+                recording.draw();
+              },
+              onProgress: (current, total) => {
+                window.dispatchEvent(
+                  new CustomEvent("animation-export-progress", {
+                    detail: { current, total },
+                  }),
+                );
+              },
+            });
+            downloadBlobFile(blob, `${name}.mp4`);
+            window.dispatchEvent(
+              new CustomEvent("animation-export-complete", {
+                detail: {
+                  filename: `${name}.mp4`,
+                  format: "MP4",
+                },
+              }),
+            );
+            return;
+          } catch (error) {
+            console.warn("WebCodecs MP4 export failed, falling back to MediaRecorder.", error);
+          }
+        }
+
         const videoFormat = getSupportedAnimationVideoFormat();
         if (!videoFormat || typeof HTMLCanvasElement.prototype.captureStream !== "function") {
           fallbackToJson();
           return;
         }
 
-        const recording = createRecordingCanvas();
         recordingStream = recording.canvas.captureStream(0);
         const track = recordingStream.getVideoTracks()[0] as CanvasCaptureMediaStreamTrack & {
           requestFrame?: () => void;

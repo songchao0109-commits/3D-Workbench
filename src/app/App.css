@@ -229,6 +229,12 @@ h2 {
   margin-top: 18px;
 }
 
+.asset-section-groups {
+  margin-top: 16px;
+  padding-bottom: 2px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.055);
+}
+
 .section-label {
   margin: 0 0 8px 8px;
   color: #707070;
@@ -276,6 +282,23 @@ h2 {
   display: grid;
   gap: 2px;
   padding: 1px 0 3px;
+}
+
+.asset-group-children {
+  display: grid;
+  gap: 2px;
+  animation: asset-group-reveal 140ms ease-out;
+}
+
+@keyframes asset-group-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .asset-item {
@@ -369,7 +392,20 @@ h2 {
 }
 
 .group-item-label {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.group-item-label small {
+  min-width: 18px;
+  border-radius: 999px;
+  padding: 2px 5px;
+  color: #9b9b9b;
+  font-size: 10px;
+  line-height: 1.2;
+  text-align: center;
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .asset-item-label-input {

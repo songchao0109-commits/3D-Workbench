@@ -34,12 +34,12 @@ export function LeftPanel() {
   const activeObjectId = useProjectStore((state) => state.activeObjectId);
   const activeGroupId = useProjectStore((state) => state.activeGroupId);
   const selectedObjectIds = useProjectStore((state) => state.selectedObjectIds);
-  const selectedCameraId = useProjectStore((state) => state.selectedCameraId);
+  const selectedCameraIds = useProjectStore((state) => state.selectedCameraIds);
   const selectObjectOrGroup = useProjectStore((state) => state.selectObjectOrGroup);
   const toggleSelectionUnit = useProjectStore((state) => state.toggleSelectionUnit);
-  const setSelectedObjects = useProjectStore((state) => state.setSelectedObjects);
+  const setSelectedAssets = useProjectStore((state) => state.setSelectedAssets);
   const setActiveGroup = useProjectStore((state) => state.setActiveGroup);
-  const setActiveCamera = useProjectStore((state) => state.setActiveCamera);
+  const selectCameraOrGroup = useProjectStore((state) => state.selectCameraOrGroup);
   const addCamera = useProjectStore((state) => state.addCamera);
   const toggleObjectVisible = useProjectStore((state) => state.toggleObjectVisible);
   const toggleObjectLocked = useProjectStore((state) => state.toggleObjectLocked);
@@ -53,6 +53,7 @@ export function LeftPanel() {
   const removeGroup = useProjectStore((state) => state.removeGroup);
   const toggleGroupCollapsed = useProjectStore((state) => state.toggleGroupCollapsed);
   const moveObjectToGroup = useProjectStore((state) => state.moveObjectToGroup);
+  const moveCameraToGroup = useProjectStore((state) => state.moveCameraToGroup);
   const copySelection = useProjectStore((state) => state.copySelection);
   const pasteClipboard = useProjectStore((state) => state.pasteClipboard);
   const removeSelection = useProjectStore((state) => state.removeSelection);
@@ -73,11 +74,16 @@ export function LeftPanel() {
     () => new Set(groups.flatMap((group) => group.objectIds)),
     [groups],
   );
+  const groupedCameraIds = useMemo(
+    () => new Set(groups.flatMap((group) => group.cameraIds)),
+    [groups],
+  );
   const matches = (value: string) =>
     normalizedSearch ? value.toLowerCase().includes(normalizedSearch) : true;
   const visibleGroups = groups
     .map((group) => {
       const groupObjects = objects.filter((object) => group.objectIds.includes(object.id));
+      const groupCameras = cameras.filter((camera) => group.cameraIds.includes(camera.id));
       const filteredObjects = normalizedSearch
         ? groupObjects.filter(
             (object) =>
@@ -85,11 +91,17 @@ export function LeftPanel() {
               matches(object.type === "character" ? "角色" : "模型"),
           )
         : groupObjects;
+      const filteredCameras = normalizedSearch
+        ? groupCameras.filter(
+            (camera) => matches(camera.name) || matches("机位") || matches("相机"),
+          )
+        : groupCameras;
       const groupMatched = matches(group.name) || matches("组");
       return {
         group,
         objects: groupMatched && normalizedSearch ? groupObjects : filteredObjects,
-        visible: groupMatched || filteredObjects.length > 0,
+        cameras: groupMatched && normalizedSearch ? groupCameras : filteredCameras,
+        visible: groupMatched || filteredObjects.length > 0 || filteredCameras.length > 0,
       };
     })
     .filter((item) => item.visible);
@@ -103,40 +115,65 @@ export function LeftPanel() {
     );
   });
   const visibleCameras = cameras.filter(
-    (camera) => matches(camera.name) || matches("机位") || matches("相机"),
+    (camera) =>
+      !groupedCameraIds.has(camera.id) &&
+      (matches(camera.name) || matches("机位") || matches("相机")),
   );
   const selectedObjects = objects.filter((object) => selectedObjectIds.includes(object.id));
-  const hasHiddenSelection = selectedObjects.some((object) => !object.visible);
-  const hasUnlockedSelection = selectedObjects.some((object) => !object.locked);
+  const selectedCameras = cameras.filter((camera) => selectedCameraIds.includes(camera.id));
+  const hasHiddenSelection =
+    selectedObjects.some((object) => !object.visible) ||
+    selectedCameras.some((camera) => !camera.visible);
+  const hasUnlockedSelection =
+    selectedObjects.some((object) => !object.locked) ||
+    selectedCameras.some((camera) => !camera.locked);
+  const selectedAssetCount = selectedObjects.length + selectedCameras.length;
   const canGroupSelection =
-    selectedObjects.length > 1 &&
+    selectedAssetCount > 1 &&
     selectedObjects.every(
       (object) => !groups.some((group) => group.objectIds.includes(object.id)),
+    ) &&
+    selectedCameras.every(
+      (camera) => !groups.some((group) => group.cameraIds.includes(camera.id)),
     );
   const hasClipboard = useProjectStore((state) => Boolean(state.clipboard?.objects.length));
   const selectedObjectGroupId =
     selectedObjects.length === 1
       ? groups.find((group) => group.objectIds.includes(selectedObjects[0].id))?.id
       : undefined;
+  const selectedCameraGroupId =
+    selectedCameras.length === 1
+      ? groups.find((group) => group.cameraIds.includes(selectedCameras[0].id))?.id
+      : undefined;
   const canMoveContextSelection =
-    selectedObjects.length > 0 &&
-    (selectedObjects.length === 1 ||
-      selectedObjects.every(
+    selectedAssetCount > 0 &&
+    (selectedAssetCount === 1 ||
+      (selectedObjects.every(
         (object) => !groups.some((group) => group.objectIds.includes(object.id)),
-      ));
-  const isBatchContext = Boolean(activeGroupId) || selectedObjects.length > 1;
+      ) &&
+        selectedCameras.every(
+          (camera) => !groups.some((group) => group.cameraIds.includes(camera.id)),
+        )));
+  const isBatchContext = Boolean(activeGroupId) || selectedAssetCount > 1;
   const visibleSelectionUnits = useMemo(
     () => [
       ...visibleGroups.map(({ group }) => ({
         key: `group:${group.id}`,
         objectIds: group.objectIds,
+        cameraIds: group.cameraIds,
       })),
       ...rootObjects.map((object) => ({
         key: `object:${object.id}`,
         objectIds: [object.id],
+        cameraIds: [] as string[],
+      })),
+      ...visibleCameras.map((camera) => ({
+        key: `camera:${camera.id}`,
+        objectIds: [] as string[],
+        cameraIds: [camera.id],
       })),
     ],
-    [rootObjects, visibleGroups],
+    [rootObjects, visibleCameras, visibleGroups],
   );
 
   const handleObjectSelect = (objectId: string, event: MouseEvent<HTMLDivElement>) => {
@@ -150,11 +187,11 @@ export function LeftPanel() {
       if (anchorIndex >= 0 && currentIndex >= 0) {
         const rangeStart = Math.min(anchorIndex, currentIndex);
         const rangeEnd = Math.max(anchorIndex, currentIndex);
-        setSelectedObjects(
-          visibleSelectionUnits
-            .slice(rangeStart, rangeEnd + 1)
-            .flatMap((unit) => unit.objectIds),
-          objectId,
+        const units = visibleSelectionUnits.slice(rangeStart, rangeEnd + 1);
+        setSelectedAssets(
+          units.flatMap((unit) => unit.objectIds),
+          units.flatMap((unit) => unit.cameraIds),
+          { kind: "object", id: objectId },
         );
         return;
       }
@@ -165,6 +202,36 @@ export function LeftPanel() {
       return;
     }
     selectObjectOrGroup(objectId);
+    selectionAnchorRef.current = unitKey;
+  };
+
+  const handleCameraSelect = (cameraId: string, event: MouseEvent<HTMLDivElement>) => {
+    const group = groups.find((item) => item.cameraIds.includes(cameraId));
+    const unitKey = group ? `group:${group.id}` : `camera:${cameraId}`;
+    if (event.shiftKey && selectionAnchorRef.current) {
+      const anchorIndex = visibleSelectionUnits.findIndex(
+        (unit) => unit.key === selectionAnchorRef.current,
+      );
+      const currentIndex = visibleSelectionUnits.findIndex((unit) => unit.key === unitKey);
+      if (anchorIndex >= 0 && currentIndex >= 0) {
+        const units = visibleSelectionUnits.slice(
+          Math.min(anchorIndex, currentIndex),
+          Math.max(anchorIndex, currentIndex) + 1,
+        );
+        setSelectedAssets(
+          units.flatMap((unit) => unit.objectIds),
+          units.flatMap((unit) => unit.cameraIds),
+          { kind: "camera", id: cameraId },
+        );
+        return;
+      }
+    }
+    if (event.metaKey || event.ctrlKey) {
+      toggleSelectionUnit(cameraId, "camera");
+      selectionAnchorRef.current = unitKey;
+      return;
+    }
+    selectCameraOrGroup(cameraId);
     selectionAnchorRef.current = unitKey;
   };
 
@@ -234,7 +301,15 @@ export function LeftPanel() {
   };
 
   const handleCameraContextMenu = (cameraId: string, event: MouseEvent<HTMLDivElement>) => {
-    setActiveCamera(cameraId);
+    const current = useProjectStore.getState();
+    if (!current.selectedCameraIds.includes(cameraId)) {
+      current.selectCameraOrGroup(cameraId);
+    }
+    const next = useProjectStore.getState();
+    if (next.activeGroupId) {
+      openAssetContextMenu({ kind: "group", groupId: next.activeGroupId }, event);
+      return;
+    }
     openAssetContextMenu({ kind: "camera", cameraId }, event);
   };
 
@@ -289,10 +364,12 @@ export function LeftPanel() {
     closeAssetContextMenu();
   };
   const runMoveToGroup = (groupId: string) => {
-    if (selectedObjects.length > 1) {
+    if (selectedAssetCount > 1) {
       moveSelectionToGroup(groupId);
     } else if (selectedObjects[0]) {
       moveObjectToGroup(selectedObjects[0].id, groupId);
+    } else if (selectedCameras[0]) {
+      moveCameraToGroup(selectedCameras[0].id, groupId);
     }
     closeAssetContextMenu();
   };
@@ -327,10 +404,10 @@ export function LeftPanel() {
         />
       </label>
 
-      <div className="asset-section">
-        <div className="section-label">对象</div>
+      <div className="asset-section asset-section-groups">
+        <div className="section-label">组</div>
         <div className="asset-list">
-          {visibleGroups.map(({ group, objects: groupObjects }) => (
+          {visibleGroups.map(({ group, objects: groupObjects, cameras: groupCameras }) => (
             <div className="asset-group" key={group.id}>
               <div
                 className={`asset-item group-item ${
@@ -357,8 +434,12 @@ export function LeftPanel() {
                 <span className="asset-row-icon group-folder-icon">
                   <GroupNodeIcon size={18} />
                 </span>
-                <span className="asset-item-label group-item-label" title={group.name}>
+                <span
+                  className="asset-item-label group-item-label"
+                  title={`${group.name} · ${group.objectIds.length} 个对象 · ${group.cameraIds.length} 个机位`}
+                >
                   {group.name}
+                  <small>{group.objectIds.length + group.cameraIds.length}</small>
                 </span>
                 <div className="row-actions">
                   <button
@@ -393,8 +474,9 @@ export function LeftPanel() {
                   </button>
                 </div>
               </div>
-              {!group.collapsed || normalizedSearch
-                ? groupObjects.map((object) => (
+              {!group.collapsed || normalizedSearch ? (
+                <div className="asset-group-children">
+                  {groupObjects.map((object) => (
                     <ObjectRow
                       active={selectedObjectIds.includes(object.id)}
                       hideQuickActions={activeGroupId === group.id}
@@ -411,10 +493,35 @@ export function LeftPanel() {
                       currentGroupId={group.id}
                       onMoveToGroup={moveObjectToGroup}
                     />
-                  ))
-                : null}
+                  ))}
+                  {groupCameras.map((camera) => (
+                    <CameraRow
+                      active={selectedCameraIds.includes(camera.id)}
+                      camera={camera}
+                      currentGroupId={group.id}
+                      groups={groups}
+                      hideQuickActions={activeGroupId === group.id}
+                      indented
+                      key={camera.id}
+                      onContextMenu={(event) => handleCameraContextMenu(camera.id, event)}
+                      onMoveToGroup={moveCameraToGroup}
+                      onRemove={removeCamera}
+                      onSelect={(event) => handleCameraSelect(camera.id, event)}
+                      onToggleLocked={toggleCameraLocked}
+                      onToggleVisible={toggleCameraVisible}
+                    />
+                  ))}
+                </div>
+              ) : null}
             </div>
           ))}
+          {!visibleGroups.length ? <div className="asset-empty">没有匹配组</div> : null}
+        </div>
+      </div>
+
+      <div className="asset-section">
+        <div className="section-label">对象</div>
+        <div className="asset-list">
           {rootObjects.map((object) => (
             <ObjectRow
               active={selectedObjectIds.includes(object.id) || activeObjectId === object.id}
@@ -430,9 +537,7 @@ export function LeftPanel() {
               onMoveToGroup={moveObjectToGroup}
             />
           ))}
-          {!visibleGroups.length && !rootObjects.length ? (
-            <div className="asset-empty">没有匹配对象</div>
-          ) : null}
+          {!rootObjects.length ? <div className="asset-empty">没有匹配对象</div> : null}
         </div>
       </div>
 
@@ -460,54 +565,18 @@ export function LeftPanel() {
         </div>
         <div className="asset-list">
           {visibleCameras.map((camera) => (
-            <div
-              className={`asset-item ${
-                selectedCameraId === camera.id && !activeObjectId && !selectedObjectIds.length
-                  ? "is-active"
-                  : ""
-              }`}
+            <CameraRow
+              active={selectedCameraIds.includes(camera.id)}
+              camera={camera}
+              groups={groups}
               key={camera.id}
-              onClick={() => setActiveCamera(camera.id)}
               onContextMenu={(event) => handleCameraContextMenu(camera.id, event)}
-            >
-              <span className="asset-row-control" aria-hidden="true" />
-              <span className="asset-row-icon">
-                <Camera size={16} />
-              </span>
-              <span className="asset-item-label" title={camera.name}>{camera.name}</span>
-              <div className="row-actions">
-                <button
-                  title={camera.visible ? "隐藏" : "显示"}
-                  type="button"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    toggleCameraVisible(camera.id);
-                  }}
-                >
-                  {camera.visible ? <Eye size={13} /> : <EyeOff size={13} />}
-                </button>
-                <button
-                  title={camera.locked ? "解锁" : "锁定"}
-                  type="button"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    toggleCameraLocked(camera.id);
-                  }}
-                >
-                  {camera.locked ? <Lock size={13} /> : <Unlock size={13} />}
-                </button>
-                <button
-                  title="删除"
-                  type="button"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    removeCamera(camera.id);
-                  }}
-                >
-                  <Trash2 size={13} />
-                </button>
-              </div>
-            </div>
+              onMoveToGroup={moveCameraToGroup}
+              onRemove={removeCamera}
+              onSelect={(event) => handleCameraSelect(camera.id, event)}
+              onToggleLocked={toggleCameraLocked}
+              onToggleVisible={toggleCameraVisible}
+            />
           ))}
           {!visibleCameras.length ? <div className="asset-empty">没有匹配机位</div> : null}
         </div>
@@ -548,6 +617,49 @@ export function LeftPanel() {
                     >
                       {camera.locked ? "解锁" : "锁定"}
                     </button>
+                    {canGroupSelection ? (
+                      <button
+                        role="menuitem"
+                        type="button"
+                        onClick={() => {
+                          groupSelection();
+                          closeAssetContextMenu();
+                        }}
+                      >
+                        打组
+                      </button>
+                    ) : null}
+                    {canMoveContextSelection &&
+                    groups.some((group) => group.id !== selectedCameraGroupId) ? (
+                      <div className="asset-context-group-actions">
+                        <button
+                          className="asset-context-menu-submenu-trigger"
+                          aria-expanded={contextGroupMoveOpen}
+                          role="menuitem"
+                          type="button"
+                          onClick={() => setContextGroupMoveOpen((current) => !current)}
+                        >
+                          <span>移至分组</span>
+                          <ChevronRight size={15} />
+                        </button>
+                        {contextGroupMoveOpen ? (
+                          <div className="asset-context-group-picker">
+                            {groups
+                              .filter((group) => group.id !== selectedCameraGroupId)
+                              .map((group) => (
+                                <button
+                                  key={group.id}
+                                  role="menuitem"
+                                  type="button"
+                                  onClick={() => runMoveToGroup(group.id)}
+                                >
+                                  {group.name}
+                                </button>
+                              ))}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
                     <div className="asset-context-menu-separator" />
                     <button
                       className="danger-action"
@@ -911,6 +1023,172 @@ function ObjectRow({
             onClick={(event) => {
               event.stopPropagation();
               onRemove(object.id);
+            }}
+          >
+            <Trash2 size={13} />
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function CameraRow({
+  active,
+  camera,
+  currentGroupId,
+  groups,
+  hideQuickActions = false,
+  indented = false,
+  onContextMenu,
+  onMoveToGroup,
+  onRemove,
+  onSelect,
+  onToggleLocked,
+  onToggleVisible,
+}: {
+  active: boolean;
+  camera: {
+    id: string;
+    name: string;
+    visible: boolean;
+    locked: boolean;
+  };
+  currentGroupId?: string;
+  groups: Array<{ id: string; name: string }>;
+  hideQuickActions?: boolean;
+  indented?: boolean;
+  onContextMenu: (event: MouseEvent<HTMLDivElement>) => void;
+  onMoveToGroup: (cameraId: string, targetGroupId?: string) => void;
+  onRemove: (cameraId: string) => void;
+  onSelect: (event: MouseEvent<HTMLDivElement>) => void;
+  onToggleLocked: (cameraId: string) => void;
+  onToggleVisible: (cameraId: string) => void;
+}) {
+  const [groupMenuOpen, setGroupMenuOpen] = useState(false);
+  const [groupMenuPosition, setGroupMenuPosition] = useState({ x: 0, y: 0 });
+  const groupMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!groupMenuOpen) {
+      return undefined;
+    }
+    const handlePointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Node && !groupMenuRef.current?.contains(event.target)) {
+        setGroupMenuOpen(false);
+      }
+    };
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => window.removeEventListener("pointerdown", handlePointerDown);
+  }, [groupMenuOpen]);
+
+  return (
+    <div
+      className={`asset-item ${active ? "is-active" : ""} ${
+        indented ? "is-child" : ""
+      } ${hideQuickActions ? "has-no-actions" : ""}`}
+      onClick={(event) => {
+        setGroupMenuOpen(false);
+        onSelect(event);
+      }}
+      onContextMenu={onContextMenu}
+    >
+      <span className="asset-row-control object-tree-guide" aria-hidden="true" />
+      <span className="asset-row-icon">
+        <Camera size={16} />
+      </span>
+      <span className="asset-item-label" title={camera.name}>{camera.name}</span>
+      {!hideQuickActions ? (
+        <div className={`row-actions ${groupMenuOpen ? "is-menu-open" : ""}`}>
+          <div className="row-action-menu" ref={groupMenuRef}>
+            <button
+              aria-expanded={groupMenuOpen}
+              title="移至分组"
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                const rect = event.currentTarget.getBoundingClientRect();
+                setGroupMenuPosition({
+                  x: Math.min(rect.right + 8, window.innerWidth - 172),
+                  y: Math.min(rect.top - 4, window.innerHeight - 220),
+                });
+                setGroupMenuOpen((current) => !current);
+              }}
+            >
+              <FolderInput size={13} />
+            </button>
+            {groupMenuOpen ? (
+              <div
+                className="group-move-menu"
+                role="menu"
+                style={{
+                  left: groupMenuPosition.x,
+                  top: Math.max(8, groupMenuPosition.y),
+                }}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="group-move-menu-title">移至分组</div>
+                {groups.filter((group) => group.id !== currentGroupId).map((group) => (
+                  <button
+                    key={group.id}
+                    role="menuitem"
+                    type="button"
+                    onClick={() => {
+                      onMoveToGroup(camera.id, group.id);
+                      setGroupMenuOpen(false);
+                    }}
+                  >
+                    {group.name}
+                  </button>
+                ))}
+                {!groups.some((group) => group.id !== currentGroupId) ? (
+                  <div className="group-move-menu-empty">暂无可选分组</div>
+                ) : null}
+                {currentGroupId ? (
+                  <>
+                    <div className="group-move-menu-separator" />
+                    <button
+                      className="group-move-menu-remove"
+                      role="menuitem"
+                      type="button"
+                      onClick={() => {
+                        onMoveToGroup(camera.id);
+                        setGroupMenuOpen(false);
+                      }}
+                    >
+                      移出当前分组
+                    </button>
+                  </>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+          <button
+            title={camera.visible ? "隐藏" : "显示"}
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              onToggleVisible(camera.id);
+            }}
+          >
+            {camera.visible ? <Eye size={13} /> : <EyeOff size={13} />}
+          </button>
+          <button
+            title={camera.locked ? "解锁" : "锁定"}
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              onToggleLocked(camera.id);
+            }}
+          >
+            {camera.locked ? <Lock size={13} /> : <Unlock size={13} />}
+          </button>
+          <button
+            title="删除"
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              onRemove(camera.id);
             }}
           >
             <Trash2 size={13} />

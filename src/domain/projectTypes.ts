@@ -156,6 +156,7 @@ export type SceneGroup = {
   locked: boolean;
   collapsed: boolean;
   objectIds: string[];
+  cameraIds: string[];
   position: Vec3;
   rotation: Vec3;
   scale: Vec3;
@@ -254,6 +255,7 @@ export type ProjectState = {
   activeObjectId?: string;
   activeGroupId?: string;
   selectedObjectIds: string[];
+  selectedCameraIds: string[];
   selectedCameraId?: string;
   activeCameraId?: string;
   activeTool: ToolMode;

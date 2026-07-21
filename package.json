@@ -12,7 +12,8 @@
     "react-dom": "^19.0.0",
     "three": "^0.179.0",
     "zustand": "^5.0.0",
-    "lucide-react": "^0.468.0"
+    "lucide-react": "^0.468.0",
+    "mp4-muxer": "^5.2.2"
   },
   "devDependencies": {
     "@types/react": "^19.0.0",

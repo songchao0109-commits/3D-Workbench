@@ -6,6 +6,7 @@ export const defaultProject: ProjectState = {
   activeShotId: "shot_001",
   activeCameraId: "camera_001",
   selectedObjectIds: [],
+  selectedCameraIds: [],
   activeTool: "move",
   transformMode: "translate",
   outputFrame: {
